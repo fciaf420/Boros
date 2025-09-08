@@ -4,12 +4,20 @@ Python utilities for fetching market APR data from the Pendle Boros Telegram bot
 
 ## Features
 
+### Data Collection
 - 📊 **Market Data Extraction**: Fetches Implied and Underlying APR rates from all available Pendle markets
 - 🤖 **Automated Navigation**: Intelligently clicks through Telegram bot inline keyboards
 - 📈 **Spread Analysis**: Calculates spreads and identifies LONG/SHORT trading opportunities
-- 🔔 **Smart Alerts**: Optional Telegram notifications for trading candidates
 - 💾 **JSON Output**: Structured data export for further analysis
 - 🛡️ **Error Handling**: Robust navigation with retry logic and Unicode support
+
+### Strategy Bot
+- 🎯 **Automated Strategy Detection**: Monitors rates and alerts on trading opportunities
+- 📋 **Multiple Strategies**: Supports Implied APR Bands and Fixed/Floating Swaps
+- 🔔 **Discord Integration**: Rich embed alerts with color coding and detailed info
+- ⚙️ **Configurable Intervals**: Environment-controlled data refresh timing
+- 🚨 **Smart Alerting**: Cooldown periods to prevent spam notifications
+- 🔄 **Automatic Data Refresh**: Fetches fresh data from Telegram periodically
 
 ## Prerequisites
 
@@ -60,13 +68,20 @@ pip install -r requirements.txt
 
 2. **Edit `.env` file** with your credentials:
    ```env
+   # Telegram API Configuration
    TG_API_ID=1234567                                    # Your numeric API ID
    TG_API_HASH=abcdef0123456789abcdef0123456789          # Your API hash
    TG_PHONE=+1234567890                                 # Your phone number with country code
    TARGET_BOT=@boros_pendle_bot                         # The Pendle Boros bot username
+   
+   # Basic Alert Configuration (Optional)
    ALERT_BOT_TOKEN=                                     # (Optional) Bot token for alerts
    ALERT_CHAT_ID=                                       # (Optional) Chat ID for alerts  
    OUTPUT_JSON=rates.json                               # Output file name
+   
+   # Strategy Bot Configuration
+   DATA_REFRESH_INTERVAL_SECONDS=1800                   # Data refresh interval (30 minutes default)
+   DISCORD_WEBHOOK_URL=                                 # (Optional) Discord webhook for strategy alerts
    ```
 
 ### 4. First Run & Authentication
@@ -104,9 +119,25 @@ To receive trading alerts via Telegram:
    ALERT_CHAT_ID=123456789
    ```
 
+### 6. Set Up Discord Alerts (Strategy Bot)
+
+To receive strategy alerts via Discord webhook:
+
+1. **Create a Discord Webhook**:
+   - Go to your Discord server settings
+   - Navigate to "Integrations" → "Webhooks"
+   - Click "New Webhook" or "Create Webhook"
+   - Choose the channel for alerts
+   - Copy the webhook URL
+
+2. **Update `.env`**:
+   ```env
+   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1234567890/your-webhook-token
+   ```
+
 ## Usage
 
-### Basic Usage
+### Data Collection (Manual)
 
 ```bash
 python telethon_rates.py
@@ -123,6 +154,24 @@ The script will:
 4. 📈 Calculate spreads and identify opportunities
 5. 💾 Save results to `rates.json`
 6. 🔔 Send alerts (if configured)
+
+### Strategy Bot (Automated)
+
+```bash
+# Run the strategy bot continuously
+python strategy_bot.py
+
+# Test with current data (single analysis)
+python strategy_bot.py test
+```
+
+The strategy bot will:
+1. 🔄 **Auto-refresh data** every 30 minutes (configurable via `DATA_REFRESH_INTERVAL_SECONDS`)
+2. 🎯 **Analyze strategies** after each data refresh:
+   - **Implied APR Bands**: Long when APR ≤6%, Short when APR ≥8%
+   - **Fixed/Floating Swaps**: Alert on spreads ≥10%
+3. 🚨 **Send alerts** via console and Discord (if webhook configured)
+4. ⏰ **Smart cooldowns** prevent alert spam (30-minute default)
 
 ### Sample Output
 
@@ -154,11 +203,45 @@ Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
 }
 ```
 
+**Strategy Bot Output:**
+```
+🤖 Strategy Alert Bot initialized
+📊 Monitoring: rates.json
+🔄 Data refresh: 1800s
+📈 Min expected move: 1.0%
+
+🚨 TRADING OPPORTUNITY ALERT 🚨
+⏰ Time: 2025-09-08 15:30:45
+📊 Symbol: ETHUSDT
+🎯 Strategy: Implied Apr Bands
+==================================================
+📊 Implied APR Band Trading (@DDangleDan's Strategy)
+   Current APR: 5.80%
+   Target APR: 6.85%
+🟢 RECOMMENDED ACTION: GO LONG YU
+   APR is low (5.80%) - BUY YU
+   Exit target: ~6.85%
+   Expected move: 1.05%
+==================================================
+💰 Expected APY: 4.20%
+⚖️ Risk Score: 0.50/1.0
+💵 Max Position: $75,000
+🔧 Leverage: 1.0x
+```
+
 ## Trading Signal Interpretation
 
+### Basic Signals (telethon_rates.py)
 - **🟢 LONG Candidate**: Underlying APR > Implied APR (positive spread ≥0.5%)
 - **🔴 SHORT Candidate**: Underlying APR < Implied APR (negative spread ≤-0.5%)
 - **ℹ️ Neutral**: Spread between -0.5% and +0.5%
+
+### Strategy Bot Signals
+- **📊 Implied APR Bands**: Based on @DDangleDan's strategy
+  - **Long**: APR ≤6.0% (target: 6.8-7.0%)
+  - **Short**: APR ≥8.0% (target: 6.0-6.8%)
+- **📊 Fixed/Floating Swaps**: Based on @ViNc2453's arbitrage
+  - **Alert**: Spread ≥10% between implied and underlying rates
 
 ## Troubleshooting
 
@@ -183,7 +266,9 @@ Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
 ### File Structure
 ```
 Boros/
-├── telethon_rates.py      # Main script
+├── telethon_rates.py      # Data collection script
+├── strategy_bot.py        # Automated strategy monitoring bot
+├── strats.py             # Trading strategy framework
 ├── .env                   # Your credentials (keep private!)
 ├── .env.example          # Template for configuration
 ├── requirements.txt       # Python dependencies
