@@ -1,0 +1,41 @@
+{
+  "generated_at": "2025-09-08T00:03:31.152289+00:00",
+  "markets": [
+    {
+      "market": "BTCUSDT",
+      "implied": 7.29,
+      "underlying": 10.02,
+      "days": null,
+      "spread": 2.73,
+      "spread_bps": 273.0,
+      "raw": "📌 Market info\n\nBTCUSDT Binance 26 Sept 2025\n\nOpen Interest: 103.75 BTC\n24h Volume: 21.49 BTC\n\n🟡 Implied APR: 7.29%\n🔵 Underlying APR: 10.02%"
+    },
+    {
+      "market": "ETHUSDT",
+      "implied": 5.66,
+      "underlying": 2.78,
+      "days": null,
+      "spread": -2.88,
+      "spread_bps": -288.0,
+      "raw": "📌 Market info\n\nETHUSDT Binance 26 Sept 2025\n\nOpen Interest: 6616.68 ETH\n24h Volume: 3401.61 ETH\n\n🟡 Implied APR: 5.66%\n🔵 Underlying APR: 2.78%"
+    },
+    {
+      "market": "BTCUSDT",
+      "implied": 6.8,
+      "underlying": 10.02,
+      "days": null,
+      "spread": 3.22,
+      "spread_bps": 322.0,
+      "raw": "📌 Market info\n\nBTCUSDT Binance 26 Dec 2025\n\nOpen Interest: 19.15 BTC\n24h Volume: 1.16 BTC\n\n🟡 Implied APR: 6.80%\n🔵 Underlying APR: 10.02%"
+    },
+    {
+      "market": "ETHUSDT",
+      "implied": 6.5,
+      "underlying": 2.78,
+      "days": null,
+      "spread": -3.72,
+      "spread_bps": -372.0,
+      "raw": "📌 Market info\n\nETHUSDT Binance 26 Dec 2025\n\nOpen Interest: 1714.76 ETH\n24h Volume: 613.05 ETH\n\n🟡 Implied APR: 6.50%\n🔵 Underlying APR: 2.78%"
+    }
+  ]
+}
