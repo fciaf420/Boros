@@ -1,2 +1,5 @@
 __pycache__/
 .env
+.claude/
+debug_*.txt
+user_session.session
