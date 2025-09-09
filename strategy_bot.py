@@ -23,7 +23,7 @@ load_dotenv()
 # Import our strategy framework (only on-chain strategies)
 from strats import (
     StrategyManager, MarketCondition, StrategyType,
-    ImpliedAPRBandStrategy
+    ImpliedAPRBandStrategy, SimpleDirectionalStrategy
 )
 
 class StrategyAlertBot:
@@ -87,7 +87,10 @@ class StrategyAlertBot:
     async def refresh_rates_data(self) -> bool:
         """Fetch fresh rates by calling telethon_rates.py"""
         try:
-            print("🔄 Refreshing rates data from Telegram bot...")
+            try:
+                print("🔄 Refreshing rates data from Telegram bot...")
+            except UnicodeEncodeError:
+                print("[REFRESH] Refreshing rates data from Telegram bot...")
             
             # Run telethon_rates.py as subprocess
             result = subprocess.run(
@@ -99,17 +102,29 @@ class StrategyAlertBot:
             
             if result.returncode == 0:
                 self.last_data_refresh = time.time()
-                print("✅ Successfully refreshed rates data")
+                try:
+                    print("✅ Successfully refreshed rates data")
+                except UnicodeEncodeError:
+                    print("[SUCCESS] Successfully refreshed rates data")
                 return True
             else:
-                print(f"❌ Failed to refresh rates data: {result.stderr}")
+                try:
+                    print(f"❌ Failed to refresh rates data: {result.stderr}")
+                except UnicodeEncodeError:
+                    print(f"[ERROR] Failed to refresh rates data: {result.stderr}")
                 return False
                 
         except subprocess.TimeoutExpired:
-            print("❌ Timeout while refreshing rates data")
+            try:
+                print("❌ Timeout while refreshing rates data")
+            except UnicodeEncodeError:
+                print("[ERROR] Timeout while refreshing rates data")
             return False
         except Exception as e:
-            print(f"❌ Error refreshing rates data: {e}")
+            try:
+                print(f"❌ Error refreshing rates data: {e}")
+            except UnicodeEncodeError:
+                print(f"[ERROR] Error refreshing rates data: {e}")
             return False
     
     def should_refresh_data(self) -> bool:
@@ -168,12 +183,21 @@ class StrategyAlertBot:
             )
             
             if response.status_code == 204:
-                print("✅ Discord alert sent successfully")
+                try:
+                    print("✅ Discord alert sent successfully")
+                except UnicodeEncodeError:
+                    print("[SUCCESS] Discord alert sent successfully")
             else:
-                print(f"❌ Discord alert failed: {response.status_code}")
+                try:
+                    print(f"❌ Discord alert failed: {response.status_code}")
+                except UnicodeEncodeError:
+                    print(f"[ERROR] Discord alert failed: {response.status_code}")
                 
         except Exception as e:
-            print(f"❌ Discord webhook error: {e}")
+            try:
+                print(f"❌ Discord webhook error: {e}")
+            except UnicodeEncodeError:
+                print(f"[ERROR] Discord webhook error: {e}")
     
     def send_alert(self, symbol: str, strategy_type: str, opportunity: Dict, market: MarketCondition):
         """Send trading opportunity alert"""
@@ -196,7 +220,9 @@ class StrategyAlertBot:
         print(f"=" * 50)
         
         # Handle supported on-chain strategies
-        if strategy_type == "implied_apr_bands":
+        if strategy_type == "simple_directional":
+            self.alert_simple_directional(opportunity, market)
+        elif strategy_type == "implied_apr_bands":
             self.alert_implied_apr_bands(opportunity, market)
         elif strategy_type == "fixed_floating_swap":
             self.alert_fixed_floating_swap(opportunity, market)
@@ -218,10 +244,41 @@ class StrategyAlertBot:
         
         # Also send to Discord if configured
         discord_title = f"🚨 {strategy_type.replace('_', ' ').title()} Alert"
-        discord_description = f"**Symbol:** {symbol}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         
-        # Color based on strategy type
-        color = 0x00ff00 if strategy_type == "implied_apr_bands" else 0x0099ff  # Green for bands, blue for swaps
+        # Enhanced description with strategy names
+        if strategy_type == "simple_directional":
+            action = opportunity.get('action', 'UNKNOWN')
+            current_spread = opportunity.get('current_spread', 0)
+            rationale = opportunity.get('rationale', 'No rationale provided')
+            
+            discord_description = f"**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action}\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+        elif strategy_type == "fixed_floating_swap":
+            action_type = opportunity.get('strategy_type', 'unknown')
+            expected_profit = opportunity.get('expected_profit', 0)
+            implied_apr = market.boros_implied_apr
+            underlying_apr = market.cex_funding_rate
+            
+            if 'short_yu' in action_type:
+                action_desc = f"SHORT YU (receive {implied_apr:.2%}) + LONG underlying (pay {underlying_apr:.2%})"
+            else:
+                action_desc = f"LONG YU (pay {implied_apr:.2%}) + SHORT underlying (receive {underlying_apr:.2%})"
+                
+            discord_description = f"**Strategy:** Boros Spread Arbitrage (@ViNc2453)\n**Symbol:** {symbol}\n**Action:** {action_desc}\n**Net Profit:** {expected_profit:.2%} APR\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0"
+        elif strategy_type == "implied_apr_bands":
+            position_type = opportunity.get('position_type', 'unknown')
+            current_apr = opportunity.get('current_implied_apr', 0)
+            target_apr = opportunity.get('target_implied_apr', 0)
+            discord_description = f"**Strategy:** Implied APR Bands (@DDangleDan)\n**Symbol:** {symbol}\n**Action:** Go {position_type.title()} YU\n**Current APR:** {current_apr:.2%}\n**Target APR:** {target_apr:.2%}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+        else:
+            discord_description = f"**Symbol:** {symbol}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+        
+        # Color based on strategy type  
+        if strategy_type == "simple_directional":
+            color = 0xff6600  # Orange for directional
+        elif strategy_type == "implied_apr_bands":
+            color = 0x00ff00  # Green for bands
+        else:
+            color = 0x0099ff  # Blue for other strategies
         self.send_discord_alert(discord_title, discord_description, color)
     
     def alert_fixed_floating_swap(self, opportunity: Dict, market: MarketCondition):
@@ -231,45 +288,127 @@ class StrategyAlertBot:
         expected_profit = opportunity["expected_profit"]
         theoretical_apy = opportunity["theoretical_apy"]
         
-        print(f"📊 Fixed vs Floating Rate Swap (@ViNc2453's Strategy)")
-        print(f"   Boros Implied APR: {market.boros_implied_apr:.2%}")
-        print(f"   Underlying APR: {market.cex_funding_rate:.2%}")
-        print(f"   Spread: {market.spread:.2%}")
+        print(f"📊 Boros Implied vs Underlying Spread (@ViNc2453's Strategy)")
+        print(f"   Current Spread: {market.spread:.2%} (Implied: {market.boros_implied_apr:.2%} | Underlying: {market.cex_funding_rate:.2%})")
+        print(f"   Target Profit: {expected_profit:.2%}")
         
-        if strategy_type == "short_yu_long_perp":
-            print(f"🔴 RECOMMENDED ACTION: SHORT YU + LONG UNDERLYING")
-            print(f"   Short YU at {market.boros_implied_apr:.2%} (receive fixed payments)")
-            print(f"   Long underlying at {market.cex_funding_rate:.2%} (benefit from higher rate)")
-            print(f"   Expected profit: {expected_profit:.2%}")
+        if strategy_type == "short_yu_long_underlying":
+            print(f"🔴 TRADING PLAN: SHORT YU + LONG UNDERLYING")
+            print(f"   📍 WHAT TO DO:")
+            print(f"      • SHORT YU position (receive {market.boros_implied_apr:.2%} APR)")
+            print(f"      • LONG underlying asset (pay {market.cex_funding_rate:.2%} APR)")
+            print(f"      • NET PROFIT: {expected_profit:.2%} APR")
+            print(f"   📍 WHY: Implied rate ({market.boros_implied_apr:.2%}) > Underlying rate ({market.cex_funding_rate:.2%})")
+            print(f"   📍 EXIT: Close when rates converge or profit target hit")
             
-        elif strategy_type == "long_yu_short_perp":
-            print(f"🟢 RECOMMENDED ACTION: LONG YU + SHORT UNDERLYING")
-            print(f"   Long YU at {market.boros_implied_apr:.2%} (pay fixed rate)")
-            print(f"   Short underlying at {market.cex_funding_rate:.2%} (benefit from lower cost)")
-            print(f"   Expected profit: {expected_profit:.2%}")
+        elif strategy_type == "long_yu_short_underlying":
+            print(f"🟢 TRADING PLAN: LONG YU + SHORT UNDERLYING")
+            print(f"   📍 WHAT TO DO:")
+            print(f"      • LONG YU position (pay {market.boros_implied_apr:.2%} APR)")
+            print(f"      • SHORT underlying asset (receive {market.cex_funding_rate:.2%} APR)")
+            print(f"      • NET PROFIT: {expected_profit:.2%} APR")
+            print(f"   📍 WHY: Underlying rate ({market.cex_funding_rate:.2%}) > Implied rate ({market.boros_implied_apr:.2%})")
+            print(f"   📍 EXIT: Close when rates converge or profit target hit")
     
+    def alert_simple_directional(self, opportunity: Dict, market: MarketCondition):
+        """Alert for Simple Directional YU Trading opportunities"""
+        
+        action = opportunity["action"]
+        position_type = opportunity["position_type"]
+        current_spread = opportunity["current_spread"]
+        abs_spread = opportunity["abs_spread"]
+        rationale = opportunity["rationale"]
+        
+        try:
+            print(f"📊 Simple Directional YU Trading (On-Chain Only)")
+        except UnicodeEncodeError:
+            print(f"[CHART] Simple Directional YU Trading (On-Chain Only)")
+        print(f"   Current Spread: {current_spread:.2%} (|{abs_spread:.2%}|)")
+        print(f"   {rationale}")
+        
+        if "ENTER" in action:
+            if "LONG" in action:
+                try:
+                    print(f"🟢 TRADING PLAN: ENTER LONG YU POSITION")
+                    print(f"   📍 WHAT TO DO:")
+                    print(f"      • BUY YU (go long)")
+                    print(f"      • Underlying APR > Implied APR by {abs_spread:.2%}")
+                    print(f"      • Expected: YU price should rise as rates converge")
+                    print(f"   📍 EXIT CRITERIA:")
+                    print(f"      • When spread narrows to ≤0.2% (approaching crossover)")
+                    print(f"      • Monitor for reversal signals")
+                except UnicodeEncodeError:
+                    print(f"[LONG] TRADING PLAN: ENTER LONG YU POSITION")
+                    print(f"   [PLAN] WHAT TO DO:")
+                    print(f"      * BUY YU (go long)")
+                    print(f"      * Underlying APR > Implied APR by {abs_spread:.2%}")
+                    print(f"      * Expected: YU price should rise as rates converge")
+                    print(f"   [EXIT] EXIT CRITERIA:")
+                    print(f"      * When spread narrows to <=0.2% (approaching crossover)")
+                    print(f"      * Monitor for reversal signals")
+            else:  # SHORT
+                try:
+                    print(f"🔴 TRADING PLAN: ENTER SHORT YU POSITION")
+                    print(f"   📍 WHAT TO DO:")
+                    print(f"      • SELL YU (go short)")
+                    print(f"      • Implied APR > Underlying APR by {abs_spread:.2%}")
+                    print(f"      • Expected: YU price should fall as rates converge")
+                    print(f"   📍 EXIT CRITERIA:")
+                    print(f"      • When spread narrows to ≤0.2% (approaching crossover)")
+                    print(f"      • Monitor for reversal signals")
+                except UnicodeEncodeError:
+                    print(f"[SHORT] TRADING PLAN: ENTER SHORT YU POSITION")
+                    print(f"   [PLAN] WHAT TO DO:")
+                    print(f"      * SELL YU (go short)")
+                    print(f"      * Implied APR > Underlying APR by {abs_spread:.2%}")
+                    print(f"      * Expected: YU price should fall as rates converge")
+                    print(f"   [EXIT] EXIT CRITERIA:")
+                    print(f"      * When spread narrows to <=0.2% (approaching crossover)")
+                    print(f"      * Monitor for reversal signals")
+                      
+        elif "EXIT" in action:
+            current_position = "LONG" if "LONG" in action else "SHORT"
+            try:
+                print(f"⚪ TRADING PLAN: EXIT {current_position} YU POSITION")
+                print(f"   📍 WHAT TO DO:")
+                print(f"      • Close your {current_position.lower()} YU position")
+                print(f"      • Spread has narrowed to {abs_spread:.2%} - near crossover")
+                print(f"      • Take profits/limit losses before reversal")
+                print(f"   📍 RATIONALE:")
+                print(f"      • Rates are converging - directional move ending")
+                print(f"      • Risk of reversal increases as spread approaches zero")
+            except UnicodeEncodeError:
+                print(f"[EXIT] TRADING PLAN: EXIT {current_position} YU POSITION")
+                print(f"   [PLAN] WHAT TO DO:")
+                print(f"      * Close your {current_position.lower()} YU position")
+                print(f"      * Spread has narrowed to {abs_spread:.2%} - near crossover")
+                print(f"      * Take profits/limit losses before reversal")
+                print(f"   [REASON] RATIONALE:")
+                print(f"      * Rates are converging - directional move ending")
+                print(f"      * Risk of reversal increases as spread approaches zero")
+
     def alert_implied_apr_bands(self, opportunity: Dict, market: MarketCondition):
         """Alert for Implied APR Band opportunities"""
         
         current_apr = opportunity["current_implied_apr"]
         target_apr = opportunity["target_implied_apr"]
         position_type = opportunity["position_type"]
+        expected_move = opportunity['expected_move']
         
         print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
-        print(f"   Current APR: {current_apr:.2%}")
-        print(f"   Target APR: {target_apr:.2%}")
+        print(f"   Current APR: {current_apr:.2%} | Target: {target_apr:.2%} | Expected Move: {expected_move:.2%}")
         
         if position_type == "long":
-            print(f"🟢 RECOMMENDED ACTION: GO LONG YU")
-            print(f"   APR is low ({current_apr:.2%}) - BUY YU")
-            print(f"   Exit target: ~{target_apr:.2%}")
-            print(f"   Expected move: {opportunity['expected_move']:.2%}")
+            print(f"🟢 TRADING PLAN: GO LONG YU")
+            print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
+            print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
+            print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
             
         elif position_type == "short":
-            print(f"🔴 RECOMMENDED ACTION: GO SHORT YU")
-            print(f"   APR is high ({current_apr:.2%}) - SELL YU")  
-            print(f"   Exit target: ~{target_apr:.2%}")
-            print(f"   Expected move: {opportunity['expected_move']:.2%}")
+            print(f"🔴 TRADING PLAN: GO SHORT YU")
+            print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")  
+            print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
+            print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
     
     async def analyze_opportunities(self):
         """Analyze current rates and identify opportunities"""
@@ -329,27 +468,59 @@ class StrategyAlertBot:
                 print(f"Expected APY: {expected_apy:.2%} vs Min Threshold: {self.min_expected_move:.2%}")
                 
                 # Evaluate supported on-chain strategies
-                if strategy_type == "implied_apr_bands":
-                    if expected_apy >= self.min_expected_move:
-                        print(f"✓ Expected move threshold met - WOULD ALERT")
+                if strategy_type == "simple_directional":
+                    min_directional_spread = self.config.get("min_directional_spread", 0.005)  # 0.5% minimum spread
+                    abs_spread = opp.get("abs_spread", 0)
+                    if abs_spread >= min_directional_spread:
+                        try:
+                            print(f"✓ Spread threshold met - WOULD ALERT")
+                        except UnicodeEncodeError:
+                            print(f"[CHECK] Spread threshold met - WOULD ALERT")
                         if self.should_send_alert(symbol, strategy_type):
                             self.send_alert(symbol, strategy_type, opp, market_condition)
                             opportunities_found += 1
                     else:
-                        print(f"✗ Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
+                        try:
+                            print(f"✗ Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
+                        except UnicodeEncodeError:
+                            print(f"[X] Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
+                        
+                elif strategy_type == "implied_apr_bands":
+                    if expected_apy >= self.min_expected_move:
+                        try:
+                            print(f"✓ Expected move threshold met - WOULD ALERT")
+                        except UnicodeEncodeError:
+                            print(f"[CHECK] Expected move threshold met - WOULD ALERT")
+                        if self.should_send_alert(symbol, strategy_type):
+                            self.send_alert(symbol, strategy_type, opp, market_condition)
+                            opportunities_found += 1
+                    else:
+                        try:
+                            print(f"✗ Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
+                        except UnicodeEncodeError:
+                            print(f"[X] Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
                         
                 elif strategy_type == "fixed_floating_swap":
-                    min_swap_spread = self.config.get("min_swap_spread", 0.05)  # 5% minimum spread
+                    min_swap_spread = self.config.get("min_swap_spread", 0.02)  # 2% minimum spread
                     if abs(market_condition.spread) >= min_swap_spread:
-                        print(f"✓ Spread threshold met - WOULD ALERT")
+                        try:
+                            print(f"✓ Spread threshold met - WOULD ALERT")
+                        except UnicodeEncodeError:
+                            print(f"[CHECK] Spread threshold met - WOULD ALERT")
                         if self.should_send_alert(symbol, strategy_type):
                             self.send_alert(symbol, strategy_type, opp, market_condition)
                             opportunities_found += 1
                     else:
-                        print(f"✗ Spread too small ({market_condition.spread:.2%} < {min_swap_spread:.2%})")
+                        try:
+                            print(f"✗ Spread too small ({market_condition.spread:.2%} < {min_swap_spread:.2%})")
+                        except UnicodeEncodeError:
+                            print(f"[X] Spread too small ({market_condition.spread:.2%} < {min_swap_spread:.2%})")
                         
                 else:
-                    print(f"✗ Strategy '{strategy_type}' not supported with current data")
+                    try:
+                        print(f"✗ Strategy '{strategy_type}' not supported with current data")
+                    except UnicodeEncodeError:
+                        print(f"[X] Strategy '{strategy_type}' not supported with current data")
         
         if opportunities_found == 0:
             try:
@@ -398,9 +569,10 @@ def create_test_alert():
         print("[TEST] Testing Strategy Alert Bot...\n")
     
     bot = StrategyAlertBot({
-        "min_expected_move": 0.005,  # 0.5% lower threshold for testing
-        "min_swap_spread": 0.01,     # 1% lower threshold for testing
-        "alert_cooldown": 0   # No cooldown for testing
+        "min_expected_move": 0.005,       # 0.5% lower threshold for testing
+        "min_directional_spread": 0.003,  # 0.3% lower threshold for testing
+        "min_swap_spread": 0.01,          # 1% lower threshold for testing
+        "alert_cooldown": 0               # No cooldown for testing
     })
     
     # Run one analysis
@@ -415,6 +587,7 @@ async def main():
         "check_interval": refresh_interval,        # Same as data refresh interval
         "data_refresh_interval": refresh_interval, # From environment variable
         "min_expected_move": 0.01,                 # 1% minimum expected move for APR bands
+        "min_directional_spread": 0.005,           # 0.5% minimum spread for directional strategy
         "min_swap_spread": 0.02,                   # 2% minimum spread for fixed/floating swaps
         "alert_cooldown": 1800,                    # 30 minute cooldown between alerts
     }

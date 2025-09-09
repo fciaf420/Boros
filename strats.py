@@ -15,6 +15,7 @@ Key Strategies:
 """
 
 import asyncio
+import json
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ import logging
 from enum import Enum
 
 class StrategyType(Enum):
+    SIMPLE_DIRECTIONAL = "simple_directional"
     FIXED_FLOATING_SWAP = "fixed_floating_swap"
     TRIPLE_PROFIT = "triple_profit"
     MEAN_REVERSION = "mean_reversion"  
@@ -60,12 +62,108 @@ class MarketCondition:
     liquidity: float
     time_to_next_funding: timedelta
 
+class SimpleDirectionalStrategy:
+    """
+    Simple directional YU trading based on Boros implied vs underlying spread.
+    
+    Logic:
+    - LONG YU when underlying > implied by ≥0.5% (expecting YU price to rise)
+    - SHORT YU when implied > underlying by ≥0.5% (expecting YU price to fall)
+    - Exit when spread approaches zero (≤0.2%)
+    - State tracking prevents entry/exit confusion
+    
+    Pure on-chain strategy - no external CEX positions required.
+    """
+    
+    def __init__(self):
+        self.name = "Simple Directional YU Trading"
+        self.risk_level = RiskLevel.LOW
+        self.min_spread = 0.005  # 0.5% minimum spread
+        self.exit_threshold = 0.002  # 0.2% exit threshold
+        self.positions_file = "positions_state.json"
+        
+    def load_positions(self) -> dict:
+        """Load current positions from state file"""
+        try:
+            with open(self.positions_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    
+    def save_positions(self, positions: dict):
+        """Save current positions to state file"""
+        with open(self.positions_file, 'w') as f:
+            json.dump(positions, f, indent=2)
+    
+    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
+        """Evaluate directional opportunity with state tracking"""
+        
+        positions = self.load_positions()
+        current_position = positions.get(market.symbol, "NONE")
+        
+        spread = market.cex_funding_rate - market.boros_implied_apr  # underlying - implied
+        abs_spread = abs(spread)
+        
+        # Entry conditions (no current position)
+        if current_position == "NONE":
+            if abs_spread >= self.min_spread:
+                if spread > 0:  # underlying > implied
+                    action = "ENTER_LONG"
+                    new_position = "LONG"
+                    rationale = f"Underlying ({market.cex_funding_rate:.2%}) > Implied ({market.boros_implied_apr:.2%})"
+                else:  # implied > underlying
+                    action = "ENTER_SHORT" 
+                    new_position = "SHORT"
+                    rationale = f"Implied ({market.boros_implied_apr:.2%}) > Underlying ({market.cex_funding_rate:.2%})"
+                
+                # Update position state
+                positions[market.symbol] = new_position
+                self.save_positions(positions)
+                
+                return {
+                    "strategy_type": "simple_directional",
+                    "action": action,
+                    "position_type": new_position.lower(),
+                    "current_spread": spread,
+                    "abs_spread": abs_spread,
+                    "rationale": rationale,
+                    "expected_apy": abs_spread * 1.0,  # No leverage
+                    "risk_score": 0.3,  # Low risk
+                    "max_position_size": 50000  # Conservative
+                }
+        
+        # Exit conditions (have current position)
+        else:
+            if abs_spread <= self.exit_threshold:
+                action = f"EXIT_{current_position}"
+                rationale = f"Spread narrowing to {abs_spread:.2%} - approaching crossover"
+                
+                # Clear position state
+                positions[market.symbol] = "NONE"
+                self.save_positions(positions)
+                
+                return {
+                    "strategy_type": "simple_directional",
+                    "action": action,
+                    "position_type": current_position.lower(),
+                    "current_spread": spread,
+                    "abs_spread": abs_spread,
+                    "rationale": rationale,
+                    "expected_apy": 0.0,  # Exit, no expected return
+                    "risk_score": 0.1,
+                    "max_position_size": 0  # Closing position
+                }
+        
+        return None  # No opportunity (either insufficient spread for entry or not ready to exit)
+
 class FixedFloatingSwapStrategy:
     """
     Based on @ViNc2453's example:
-    - Binance ETH funding at -8.5% APY (receive money for shorts)
-    - Boros quoted +6.33% APY (pay this for long YU)
-    - 15% spread = massive arbitrage opportunity
+    - Binance ETH funding at 8.5% APY (cost to short)
+    - Boros implied +6.33% APY (cost to long YU)
+    - 2.17% spread = profitable arbitrage opportunity
+    
+    Strategy: Exploit spreads between CEX funding rates and Boros implied rates
     """
     
     def __init__(self):
@@ -75,23 +173,23 @@ class FixedFloatingSwapStrategy:
     def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
         """Evaluate if conditions are favorable for fixed/floating swap"""
         
-        # Look for large spreads between CEX funding and Boros implied APR
-        min_spread = 0.10  # 10% minimum spread
+        # Look for meaningful spreads between CEX funding and Boros implied APR
+        min_spread = 0.02  # 2% minimum spread (based on corrected analysis)
         
         if abs(market.spread) < min_spread:
             return None
             
         # Determine position based on spread direction
         if market.cex_funding_rate < market.boros_implied_apr:
-            # CEX funding is lower (more negative) than Boros implied
-            # Strategy: Short YU (receive fixed APR), Long perp on CEX (receive funding)
-            strategy_type = "short_yu_long_perp"
-            expected_profit = market.spread
+            # Underlying rate is lower than Boros implied rate
+            # Strategy: Short YU (receive implied APR), Long underlying (pay underlying rate)
+            strategy_type = "short_yu_long_underlying"
+            expected_profit = market.boros_implied_apr - market.cex_funding_rate  # Always positive
         else:
-            # CEX funding is higher than Boros implied  
-            # Strategy: Long YU (pay fixed APR), Short perp on CEX (pay funding)
-            strategy_type = "long_yu_short_perp"
-            expected_profit = market.spread
+            # Underlying rate is higher than Boros implied rate  
+            # Strategy: Long YU (pay implied APR), Short underlying (receive underlying rate)
+            strategy_type = "long_yu_short_underlying"
+            expected_profit = market.cex_funding_rate - market.boros_implied_apr  # Always positive
             
         # Calculate theoretical APY with leverage
         max_leverage = 1.2  # Boros current limit
@@ -104,7 +202,8 @@ class FixedFloatingSwapStrategy:
             "strategy_type": strategy_type,
             "expected_profit": expected_profit,
             "theoretical_apy": theoretical_apy,
-            "risk_score": risk_score,
+            "expected_apy": theoretical_apy,  # Add this for alert system compatibility
+            "risk_score": min(risk_score, 1.0),  # Cap at 1.0 for display
             "max_position_size": min(market.liquidity * 0.1, 1000000),  # 10% of liquidity or $1M
             "recommended_leverage": min(max_leverage, 1.0 + (expected_profit / 0.1))  # Scale leverage with spread
         }
@@ -397,11 +496,13 @@ class StrategyManager:
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self.strategies = {
-            StrategyType.FIXED_FLOATING_SWAP: FixedFloatingSwapStrategy(),
-            StrategyType.TRIPLE_PROFIT: TripleProfitStrategy(),
-            StrategyType.MEAN_REVERSION: MeanReversionStrategy(),
-            StrategyType.DELTA_NEUTRAL_HEDGE: DeltaNeutralHedgeStrategy(),
+            StrategyType.SIMPLE_DIRECTIONAL: SimpleDirectionalStrategy(),
             StrategyType.IMPLIED_APR_BANDS: ImpliedAPRBandStrategy()
+            # Removed strategies requiring external CEX positions:
+            # StrategyType.FIXED_FLOATING_SWAP: FixedFloatingSwapStrategy(),
+            # StrategyType.TRIPLE_PROFIT: TripleProfitStrategy(),
+            # StrategyType.MEAN_REVERSION: MeanReversionStrategy(),
+            # StrategyType.DELTA_NEUTRAL_HEDGE: DeltaNeutralHedgeStrategy(),
         }
 
         # Apply config overrides for implied APR bands if provided
@@ -430,23 +531,11 @@ class StrategyManager:
         
         opportunities = []
         
-        # Fixed/Floating Swap
-        swap_opp = self.strategies[StrategyType.FIXED_FLOATING_SWAP].evaluate_opportunity(market)
-        if swap_opp:
-            swap_opp["strategy"] = StrategyType.FIXED_FLOATING_SWAP
-            opportunities.append(swap_opp)
-            
-        # Triple Profit
-        triple_opp = self.strategies[StrategyType.TRIPLE_PROFIT].evaluate_opportunity(market)
-        if triple_opp:
-            triple_opp["strategy"] = StrategyType.TRIPLE_PROFIT
-            opportunities.append(triple_opp)
-            
-        # Mean Reversion
-        mean_opp = self.strategies[StrategyType.MEAN_REVERSION].evaluate_opportunity(market)
-        if mean_opp:
-            mean_opp["strategy"] = StrategyType.MEAN_REVERSION
-            opportunities.append(mean_opp)
+        # Simple Directional Strategy
+        directional_opp = self.strategies[StrategyType.SIMPLE_DIRECTIONAL].evaluate_opportunity(market)
+        if directional_opp:
+            directional_opp["strategy"] = StrategyType.SIMPLE_DIRECTIONAL
+            opportunities.append(directional_opp)
 
         # Implied APR Bands (Dan's rules)
         bands_opp = self.strategies[StrategyType.IMPLIED_APR_BANDS].evaluate_opportunity(market)
@@ -475,10 +564,7 @@ class StrategyManager:
             
         # Risk-based thresholds
         min_expected_returns = {
-            StrategyType.FIXED_FLOATING_SWAP: 0.08,    # 8% minimum
-            StrategyType.TRIPLE_PROFIT: 0.12,          # 12% minimum (higher complexity)
-            StrategyType.MEAN_REVERSION: 0.15,         # 15% minimum (high risk)
-            StrategyType.DELTA_NEUTRAL_HEDGE: -0.05,   # Defensive, cost is acceptable
+            StrategyType.SIMPLE_DIRECTIONAL: 0.005,    # 0.5% minimum spread
             StrategyType.IMPLIED_APR_BANDS: 0.01       # 1% proxy threshold for band moves
         }
         
@@ -489,10 +575,7 @@ class StrategyManager:
             
         # Risk score check
         max_risk_scores = {
-            StrategyType.FIXED_FLOATING_SWAP: 0.7,
-            StrategyType.TRIPLE_PROFIT: 0.8,
-            StrategyType.MEAN_REVERSION: 0.9,
-            StrategyType.DELTA_NEUTRAL_HEDGE: 0.5,
+            StrategyType.SIMPLE_DIRECTIONAL: 0.5,      # Low risk
             StrategyType.IMPLIED_APR_BANDS: 0.7
         }
         
