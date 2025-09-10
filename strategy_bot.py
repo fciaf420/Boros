@@ -154,9 +154,19 @@ class StrategyAlertBot:
             time_to_next_funding=timedelta(hours=4)
         )
     
-    def should_send_alert(self, symbol: str, strategy_type: str) -> bool:
-        """Check if we should send alert (avoid spam)"""
-        alert_key = f"{symbol}_{strategy_type}"
+    def should_send_alert(self, symbol: str, strategy_type: str, action: Optional[str] = None) -> bool:
+        """Check if we should send alert (avoid spam).
+
+        - Uses separate cooldown keys for ENTER vs EXIT (by including action).
+        - Always allow EXIT alerts to bypass cooldown to ensure timely exits.
+        """
+        action_part = (action or "").upper()
+        alert_key = f"{symbol}_{strategy_type}" + (f"_{action_part}" if action_part else "")
+
+        # Always allow exit alerts (safety-first)
+        if action_part.startswith("EXIT"):
+            return True
+
         last_alert = self.last_alerts.get(alert_key, 0)
         return (time.time() - last_alert) > self.alert_cooldown
     
@@ -202,7 +212,9 @@ class StrategyAlertBot:
     def send_alert(self, symbol: str, strategy_type: str, opportunity: Dict, market: MarketCondition):
         """Send trading opportunity alert"""
         
-        alert_key = f"{symbol}_{strategy_type}"
+        # Use action-aware cooldown key so ENTER and EXIT have independent cooldowns
+        action_part = (opportunity.get('action') or '').upper()
+        alert_key = f"{symbol}_{strategy_type}" + (f"_{action_part}" if action_part else "")
         self.last_alerts[alert_key] = time.time()
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -268,7 +280,28 @@ class StrategyAlertBot:
             position_type = opportunity.get('position_type', 'unknown')
             current_apr = opportunity.get('current_implied_apr', 0)
             target_apr = opportunity.get('target_implied_apr', 0)
-            discord_description = f"**Strategy:** Implied APR Bands (@DDangleDan)\n**Symbol:** {symbol}\n**Action:** Go {position_type.title()} YU\n**Current APR:** {current_apr:.2%}\n**Target APR:** {target_apr:.2%}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+            action = (opportunity.get('action') or '').upper()
+            if action.startswith('EXIT'):
+                discord_description = (
+                    f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
+                    f"**Symbol:** {symbol}\n"
+                    f"**Action:** EXIT {position_type.upper()} YU\n"
+                    f"**Current APR:** {current_apr:.2%}\n"
+                    f"**Exit Target:** {target_apr:.2%}\n"
+                    f"**Reason:** Target reached; close position to realize move\n"
+                    f"**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0"
+                )
+            else:
+                discord_description = (
+                    f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
+                    f"**Symbol:** {symbol}\n"
+                    f"**Action:** Go {position_type.title()} YU\n"
+                    f"**Current APR:** {current_apr:.2%}\n"
+                    f"**Target APR:** {target_apr:.2%}\n"
+                    f"**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n"
+                    f"**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n"
+                    f"**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+                )
         else:
             discord_description = f"**Symbol:** {symbol}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         
@@ -393,22 +426,28 @@ class StrategyAlertBot:
         current_apr = opportunity["current_implied_apr"]
         target_apr = opportunity["target_implied_apr"]
         position_type = opportunity["position_type"]
-        expected_move = opportunity['expected_move']
+        expected_move = opportunity.get('expected_move', 0)
+        action = (opportunity.get('action') or '').upper()
         
         print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
         print(f"   Current APR: {current_apr:.2%} | Target: {target_apr:.2%} | Expected Move: {expected_move:.2%}")
         
-        if position_type == "long":
-            print(f"🟢 TRADING PLAN: GO LONG YU")
-            print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
-            print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
-            print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
-            
-        elif position_type == "short":
-            print(f"🔴 TRADING PLAN: GO SHORT YU")
-            print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")  
-            print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
-            print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+        if action.startswith('EXIT'):
+            side = 'LONG' if 'LONG' in action else 'SHORT'
+            print(f"⚪ TRADING PLAN: EXIT {side} YU")
+            print(f"   📍 WHAT TO DO: Close your {side.lower()} YU position")
+            print(f"   📍 RATIONALE: Target reached (~{target_apr:.2%}); realize gains and reset")
+        else:
+            if position_type == "long":
+                print(f"🟢 TRADING PLAN: GO LONG YU")
+                print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
+                print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
+                print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+            elif position_type == "short":
+                print(f"🔴 TRADING PLAN: GO SHORT YU")
+                print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")  
+                print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
+                print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
     
     async def analyze_opportunities(self):
         """Analyze current rates and identify opportunities"""
@@ -471,34 +510,49 @@ class StrategyAlertBot:
                 if strategy_type == "simple_directional":
                     min_directional_spread = self.config.get("min_directional_spread", 0.005)  # 0.5% minimum spread
                     abs_spread = opp.get("abs_spread", 0)
-                    if abs_spread >= min_directional_spread:
-                        try:
-                            print(f"✓ Spread threshold met - WOULD ALERT")
-                        except UnicodeEncodeError:
-                            print(f"[CHECK] Spread threshold met - WOULD ALERT")
-                        if self.should_send_alert(symbol, strategy_type):
+                    action = (opp.get("action") or "").upper()
+
+                    # Always alert on EXIT actions regardless of entry threshold
+                    if action.startswith("EXIT"):
+                        if self.should_send_alert(symbol, strategy_type, action):
                             self.send_alert(symbol, strategy_type, opp, market_condition)
                             opportunities_found += 1
                     else:
-                        try:
-                            print(f"✗ Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
-                        except UnicodeEncodeError:
-                            print(f"[X] Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
+                        if abs_spread >= min_directional_spread:
+                            try:
+                                print(f"✓ Spread threshold met - WOULD ALERT")
+                            except UnicodeEncodeError:
+                                print(f"[CHECK] Spread threshold met - WOULD ALERT")
+                            if self.should_send_alert(symbol, strategy_type, action):
+                                self.send_alert(symbol, strategy_type, opp, market_condition)
+                                opportunities_found += 1
+                        else:
+                            try:
+                                print(f"✗ Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
+                            except UnicodeEncodeError:
+                                print(f"[X] Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
                         
                 elif strategy_type == "implied_apr_bands":
-                    if expected_apy >= self.min_expected_move:
-                        try:
-                            print(f"✓ Expected move threshold met - WOULD ALERT")
-                        except UnicodeEncodeError:
-                            print(f"[CHECK] Expected move threshold met - WOULD ALERT")
-                        if self.should_send_alert(symbol, strategy_type):
+                    action = (opp.get("action") or "").upper()
+                    if action.startswith("EXIT"):
+                        # Always alert on EXIT for APR bands
+                        if self.should_send_alert(symbol, strategy_type, action):
                             self.send_alert(symbol, strategy_type, opp, market_condition)
                             opportunities_found += 1
                     else:
-                        try:
-                            print(f"✗ Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
-                        except UnicodeEncodeError:
-                            print(f"[X] Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
+                        if expected_apy >= self.min_expected_move:
+                            try:
+                                print(f"✓ Expected move threshold met - WOULD ALERT")
+                            except UnicodeEncodeError:
+                                print(f"[CHECK] Expected move threshold met - WOULD ALERT")
+                            if self.should_send_alert(symbol, strategy_type, action):
+                                self.send_alert(symbol, strategy_type, opp, market_condition)
+                                opportunities_found += 1
+                        else:
+                            try:
+                                print(f"✗ Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
+                            except UnicodeEncodeError:
+                                print(f"[X] Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
                         
                 elif strategy_type == "fixed_floating_swap":
                     min_swap_spread = self.config.get("min_swap_spread", 0.02)  # 2% minimum spread
@@ -574,6 +628,8 @@ def create_test_alert():
         "min_swap_spread": 0.01,          # 1% lower threshold for testing
         "alert_cooldown": 0               # No cooldown for testing
     })
+    # Avoid refreshing data during test; use existing rates.json
+    bot.last_data_refresh = time.time()
     
     # Run one analysis
     asyncio.run(bot.analyze_opportunities())

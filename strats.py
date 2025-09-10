@@ -349,6 +349,8 @@ class ImpliedAPRBandStrategy:
     def __init__(self):
         self.name = "Implied APR Bands"
         self.risk_level = RiskLevel.MEDIUM
+        # Track APR band positions in the shared state file
+        self.positions_file = "positions_state.json"
         # Default symbol band config; values are annualized APR levels (e.g., 0.06 = 6%)
         self.bands_by_symbol = {
             "ETHUSDT": {
@@ -370,6 +372,17 @@ class ImpliedAPRBandStrategy:
             "max_adds": 2
         }
 
+    def load_positions(self) -> dict:
+        try:
+            with open(self.positions_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def save_positions(self, positions: dict):
+        with open(self.positions_file, 'w') as f:
+            json.dump(positions, f, indent=2)
+
     def get_bands(self, symbol: str) -> dict:
         return self.bands_by_symbol.get(symbol, self.default_bands)
 
@@ -377,52 +390,105 @@ class ImpliedAPRBandStrategy:
         bands = self.get_bands(market.symbol)
         apr = market.boros_implied_apr
 
-        opp: Optional[Dict] = None
+        # Load current APR-band position state; keep it separate from directional by namespacing key
+        positions = self.load_positions()
+        key = f"APR_BANDS:{market.symbol}"
+        current_position = positions.get(key, "NONE")  # NONE | LONG | SHORT
 
-        # Long setup: buy low APR, target mid band
-        if apr <= bands["long_entry"]:
-            move = max(0.0, bands["long_exit"] - apr)
-            # Map APR move to expected APY proxy: use multiplier to reflect YU mark sensitivity
-            sensitivity = 4.0  # heuristic proxy; tune with live data/backtests
-            expected_apy = move * sensitivity
-            opp = {
-                "strategy_type": "implied_apr_bands_long",
-                "position_type": "long",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["long_exit"],
-                "expected_move": move,
-                "expected_apy": expected_apy,
-                "risk_score": 0.5,  # medium
-                "max_position_size": min(market.liquidity * 0.03, 250000),
-                "recommended_leverage": 1.0,
-                "dca_step": bands["dca_step"],
-                "max_adds": bands["max_adds"],
-                "stop_loss": None,
-                "take_profit": None
-            }
+        # ENTRY LOGIC (only if not already in an APR bands position)
+        if current_position == "NONE":
+            # Long setup: buy low APR, target mid band
+            if apr <= bands["long_entry"]:
+                move = max(0.0, bands["long_exit"] - apr)
+                sensitivity = 4.0  # heuristic proxy; tune with live data/backtests
+                expected_apy = move * sensitivity
 
-        # Short setup: sell high APR, target back to mid band
-        elif apr >= bands["short_entry"]:
-            move = max(0.0, apr - bands["short_exit"])
-            sensitivity = 4.0
-            expected_apy = move * sensitivity
-            opp = {
-                "strategy_type": "implied_apr_bands_short",
-                "position_type": "short",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["short_exit"],
-                "expected_move": move,
-                "expected_apy": expected_apy,
-                "risk_score": 0.6,  # slightly higher risk given potential to be underwater
-                "max_position_size": min(market.liquidity * 0.03, 250000),
-                "recommended_leverage": 1.0,
-                "dca_step": bands["dca_step"],
-                "max_adds": bands["max_adds"],
-                "stop_loss": None,
-                "take_profit": None
-            }
+                positions[key] = "LONG"
+                self.save_positions(positions)
 
-        return opp
+                return {
+                    "strategy_type": "implied_apr_bands_long",
+                    "action": "ENTER_LONG",
+                    "position_type": "long",
+                    "current_implied_apr": apr,
+                    "target_implied_apr": bands["long_exit"],
+                    "expected_move": move,
+                    "expected_apy": expected_apy,
+                    "risk_score": 0.5,  # medium
+                    "max_position_size": min(market.liquidity * 0.03, 250000),
+                    "recommended_leverage": 1.0,
+                    "dca_step": bands["dca_step"],
+                    "max_adds": bands["max_adds"],
+                    "stop_loss": None,
+                    "take_profit": None
+                }
+
+            # Short setup: sell high APR, target back to mid band
+            elif apr >= bands["short_entry"]:
+                move = max(0.0, apr - bands["short_exit"])
+                sensitivity = 4.0
+                expected_apy = move * sensitivity
+
+                positions[key] = "SHORT"
+                self.save_positions(positions)
+
+                return {
+                    "strategy_type": "implied_apr_bands_short",
+                    "action": "ENTER_SHORT",
+                    "position_type": "short",
+                    "current_implied_apr": apr,
+                    "target_implied_apr": bands["short_exit"],
+                    "expected_move": move,
+                    "expected_apy": expected_apy,
+                    "risk_score": 0.6,  # slightly higher risk given potential to be underwater
+                    "max_position_size": min(market.liquidity * 0.03, 250000),
+                    "recommended_leverage": 1.0,
+                    "dca_step": bands["dca_step"],
+                    "max_adds": bands["max_adds"],
+                    "stop_loss": None,
+                    "take_profit": None
+                }
+
+        # EXIT LOGIC (only if currently in an APR bands position)
+        else:
+            if current_position == "LONG":
+                # Exit long when APR reaches the long_exit target (or higher)
+                if apr >= bands["long_exit"]:
+                    positions[key] = "NONE"
+                    self.save_positions(positions)
+
+                    return {
+                        "strategy_type": "implied_apr_bands_long",
+                        "action": "EXIT_LONG",
+                        "position_type": "long",
+                        "current_implied_apr": apr,
+                        "target_implied_apr": bands["long_exit"],
+                        "expected_move": 0.0,
+                        "expected_apy": 0.0,
+                        "risk_score": 0.2,
+                        "max_position_size": 0,
+                        "recommended_leverage": 1.0
+                    }
+            elif current_position == "SHORT":
+                # Exit short when APR falls back to the short_exit target (or lower)
+                if apr <= bands["short_exit"]:
+                    positions[key] = "NONE"
+                    self.save_positions(positions)
+
+                    return {
+                        "strategy_type": "implied_apr_bands_short",
+                        "action": "EXIT_SHORT",
+                        "position_type": "short",
+                        "current_implied_apr": apr,
+                        "target_implied_apr": bands["short_exit"],
+                        "expected_move": 0.0,
+                        "expected_apy": 0.0,
+                        "risk_score": 0.2,
+                        "max_position_size": 0,
+                        "recommended_leverage": 1.0
+                    }
+
+        return None
 
 class DeltaNeutralHedgeStrategy:
     """

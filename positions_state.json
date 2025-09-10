@@ -1,4 +1,4 @@
 {
-  "BTCUSDT": "LONG",
-  "ETHUSDT": "NONE"
+  "BTCUSDT": "SHORT",
+  "ETHUSDT": "LONG"
 }
