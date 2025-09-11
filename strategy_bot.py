@@ -262,8 +262,13 @@ class StrategyAlertBot:
             action = opportunity.get('action', 'UNKNOWN')
             current_spread = opportunity.get('current_spread', 0)
             rationale = opportunity.get('rationale', 'No rationale provided')
+            is_reversal = opportunity.get('is_reversal', False)
+            previous_position = opportunity.get('previous_position', '')
             
-            discord_description = f"**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action}\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+            if is_reversal:
+                discord_description = f"**🔄 POSITION REVERSAL Alert**\n**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action} (Reversal: {previous_position} → {action.split('_')[1]})\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}\n\n⚡ **URGENT: Close {previous_position} position first, then enter {action.split('_')[1]}!**"
+            else:
+                discord_description = f"**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action}\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         elif strategy_type == "fixed_floating_swap":
             action_type = opportunity.get('strategy_type', 'unknown')
             expected_profit = opportunity.get('expected_profit', 0)
@@ -281,6 +286,9 @@ class StrategyAlertBot:
             current_apr = opportunity.get('current_implied_apr', 0)
             target_apr = opportunity.get('target_implied_apr', 0)
             action = (opportunity.get('action') or '').upper()
+            is_reversal = opportunity.get('is_reversal', False)
+            previous_position = opportunity.get('previous_position', '')
+            
             if action.startswith('EXIT'):
                 discord_description = (
                     f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
@@ -290,6 +298,19 @@ class StrategyAlertBot:
                     f"**Exit Target:** {target_apr:.2%}\n"
                     f"**Reason:** Target reached; close position to realize move\n"
                     f"**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0"
+                )
+            elif is_reversal:
+                discord_description = (
+                    f"**🔄 POSITION REVERSAL Alert**\n"
+                    f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
+                    f"**Symbol:** {symbol}\n"
+                    f"**Action:** {action} (Reversal: {previous_position} → {position_type.upper()})\n"
+                    f"**Current APR:** {current_apr:.2%}\n"
+                    f"**Target APR:** {target_apr:.2%}\n"
+                    f"**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n"
+                    f"**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n"
+                    f"**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}\n\n"
+                    f"⚡ **URGENT: Close {previous_position} position first, then enter {position_type.upper()}!**"
                 )
             else:
                 discord_description = (
@@ -305,8 +326,11 @@ class StrategyAlertBot:
         else:
             discord_description = f"**Symbol:** {symbol}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         
-        # Color based on strategy type  
-        if strategy_type == "simple_directional":
+        # Color based on strategy type and reversal status
+        is_reversal = opportunity.get('is_reversal', False)
+        if is_reversal:
+            color = 0xff0066  # Hot pink for reversals (urgent attention)
+        elif strategy_type == "simple_directional":
             color = 0xff6600  # Orange for directional
         elif strategy_type == "implied_apr_bands":
             color = 0x00ff00  # Green for bands
@@ -351,29 +375,50 @@ class StrategyAlertBot:
         current_spread = opportunity["current_spread"]
         abs_spread = opportunity["abs_spread"]
         rationale = opportunity["rationale"]
+        is_reversal = opportunity.get("is_reversal", False)
+        previous_position = opportunity.get("previous_position", "")
         
         try:
-            print(f"📊 Simple Directional YU Trading (On-Chain Only)")
+            if is_reversal:
+                print(f"🔄 POSITION REVERSAL: Simple Directional YU Trading")
+                print(f"   ⚡ REVERSING: {previous_position} → {position_type.upper()}")
+            else:
+                print(f"📊 Simple Directional YU Trading (On-Chain Only)")
         except UnicodeEncodeError:
-            print(f"[CHART] Simple Directional YU Trading (On-Chain Only)")
+            if is_reversal:
+                print(f"[REVERSAL] POSITION REVERSAL: Simple Directional YU Trading")
+                print(f"   [CHANGE] REVERSING: {previous_position} -> {position_type.upper()}")
+            else:
+                print(f"[CHART] Simple Directional YU Trading (On-Chain Only)")
         print(f"   Current Spread: {current_spread:.2%} (|{abs_spread:.2%}|)")
         print(f"   {rationale}")
         
         if "ENTER" in action:
+            reversal_prefix = "🔄 URGENT REVERSAL: " if is_reversal else ""
+            reversal_note = f" (Close {previous_position} first!)" if is_reversal else ""
+            
             if "LONG" in action:
                 try:
-                    print(f"🟢 TRADING PLAN: ENTER LONG YU POSITION")
+                    print(f"🟢 {reversal_prefix}TRADING PLAN: ENTER LONG YU POSITION{reversal_note}")
                     print(f"   📍 WHAT TO DO:")
-                    print(f"      • BUY YU (go long)")
+                    if is_reversal:
+                        print(f"      • FIRST: Close your {previous_position} YU position immediately")
+                        print(f"      • THEN: BUY YU (go long)")
+                    else:
+                        print(f"      • BUY YU (go long)")
                     print(f"      • Underlying APR > Implied APR by {abs_spread:.2%}")
                     print(f"      • Expected: YU price should rise as rates converge")
                     print(f"   📍 EXIT CRITERIA:")
                     print(f"      • When spread narrows to ≤0.2% (approaching crossover)")
                     print(f"      • Monitor for reversal signals")
                 except UnicodeEncodeError:
-                    print(f"[LONG] TRADING PLAN: ENTER LONG YU POSITION")
+                    print(f"[LONG] {reversal_prefix}TRADING PLAN: ENTER LONG YU POSITION{reversal_note}")
                     print(f"   [PLAN] WHAT TO DO:")
-                    print(f"      * BUY YU (go long)")
+                    if is_reversal:
+                        print(f"      * FIRST: Close your {previous_position} YU position immediately")
+                        print(f"      * THEN: BUY YU (go long)")
+                    else:
+                        print(f"      * BUY YU (go long)")
                     print(f"      * Underlying APR > Implied APR by {abs_spread:.2%}")
                     print(f"      * Expected: YU price should rise as rates converge")
                     print(f"   [EXIT] EXIT CRITERIA:")
@@ -381,18 +426,26 @@ class StrategyAlertBot:
                     print(f"      * Monitor for reversal signals")
             else:  # SHORT
                 try:
-                    print(f"🔴 TRADING PLAN: ENTER SHORT YU POSITION")
+                    print(f"🔴 {reversal_prefix}TRADING PLAN: ENTER SHORT YU POSITION{reversal_note}")
                     print(f"   📍 WHAT TO DO:")
-                    print(f"      • SELL YU (go short)")
+                    if is_reversal:
+                        print(f"      • FIRST: Close your {previous_position} YU position immediately")
+                        print(f"      • THEN: SELL YU (go short)")
+                    else:
+                        print(f"      • SELL YU (go short)")
                     print(f"      • Implied APR > Underlying APR by {abs_spread:.2%}")
                     print(f"      • Expected: YU price should fall as rates converge")
                     print(f"   📍 EXIT CRITERIA:")
                     print(f"      • When spread narrows to ≤0.2% (approaching crossover)")
                     print(f"      • Monitor for reversal signals")
                 except UnicodeEncodeError:
-                    print(f"[SHORT] TRADING PLAN: ENTER SHORT YU POSITION")
+                    print(f"[SHORT] {reversal_prefix}TRADING PLAN: ENTER SHORT YU POSITION{reversal_note}")
                     print(f"   [PLAN] WHAT TO DO:")
-                    print(f"      * SELL YU (go short)")
+                    if is_reversal:
+                        print(f"      * FIRST: Close your {previous_position} YU position immediately")
+                        print(f"      * THEN: SELL YU (go short)")
+                    else:
+                        print(f"      * SELL YU (go short)")
                     print(f"      * Implied APR > Underlying APR by {abs_spread:.2%}")
                     print(f"      * Expected: YU price should fall as rates converge")
                     print(f"   [EXIT] EXIT CRITERIA:")
@@ -428,8 +481,14 @@ class StrategyAlertBot:
         position_type = opportunity["position_type"]
         expected_move = opportunity.get('expected_move', 0)
         action = (opportunity.get('action') or '').upper()
+        is_reversal = opportunity.get("is_reversal", False)
+        previous_position = opportunity.get("previous_position", "")
         
-        print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
+        if is_reversal:
+            print(f"🔄 POSITION REVERSAL: Implied APR Band Trading (@DDangleDan's Strategy)")
+            print(f"   ⚡ REVERSING: {previous_position} → {position_type.upper()}")
+        else:
+            print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
         print(f"   Current APR: {current_apr:.2%} | Target: {target_apr:.2%} | Expected Move: {expected_move:.2%}")
         
         if action.startswith('EXIT'):
@@ -438,14 +497,25 @@ class StrategyAlertBot:
             print(f"   📍 WHAT TO DO: Close your {side.lower()} YU position")
             print(f"   📍 RATIONALE: Target reached (~{target_apr:.2%}); realize gains and reset")
         else:
+            reversal_prefix = "🔄 URGENT REVERSAL: " if is_reversal else ""
+            reversal_note = f" (Close {previous_position} first!)" if is_reversal else ""
+            
             if position_type == "long":
-                print(f"🟢 TRADING PLAN: GO LONG YU")
-                print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
+                print(f"🟢 {reversal_prefix}TRADING PLAN: GO LONG YU{reversal_note}")
+                if is_reversal:
+                    print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
+                    print(f"   📍 ENTRY: APR jumped to {current_apr:.2%} - BUY YU now")
+                else:
+                    print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
                 print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
                 print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
             elif position_type == "short":
-                print(f"🔴 TRADING PLAN: GO SHORT YU")
-                print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")  
+                print(f"🔴 {reversal_prefix}TRADING PLAN: GO SHORT YU{reversal_note}")
+                if is_reversal:
+                    print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
+                    print(f"   📍 ENTRY: APR dropped to {current_apr:.2%} - SELL YU now")
+                else:
+                    print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")
                 print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
                 print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
     

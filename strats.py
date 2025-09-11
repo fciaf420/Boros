@@ -95,66 +95,115 @@ class SimpleDirectionalStrategy:
         with open(self.positions_file, 'w') as f:
             json.dump(positions, f, indent=2)
     
+    def check_exit_conditions(self, market: MarketCondition, current_position: str) -> Optional[Dict]:
+        """Check if current position should be exited"""
+        spread = market.cex_funding_rate - market.boros_implied_apr
+        abs_spread = abs(spread)
+        
+        # Exit condition 1: Spread narrowing (approaching crossover)
+        if abs_spread <= self.exit_threshold:
+            action = f"EXIT_{current_position}"
+            rationale = f"Spread narrowing to {abs_spread:.2%} - approaching crossover"
+        
+        # Exit condition 2: Position moving strongly against us
+        elif ((current_position == "LONG" and spread <= -self.min_spread) or 
+              (current_position == "SHORT" and spread >= self.min_spread)):
+            action = f"EXIT_{current_position}"
+            if current_position == "LONG":
+                rationale = f"Strong contrary signal: Implied > Underlying by {abs_spread:.2%} - exit LONG"
+            else:
+                rationale = f"Strong contrary signal: Underlying > Implied by {abs_spread:.2%} - exit SHORT"
+        
+        else:
+            return None
+            
+        return {
+            "strategy_type": "simple_directional",
+            "action": action,
+            "position_type": current_position.lower(),
+            "current_spread": spread,
+            "abs_spread": abs_spread,
+            "rationale": rationale,
+            "expected_apy": 0.0,  # Exit, no expected return
+            "risk_score": 0.1,
+            "max_position_size": 0  # Closing position
+        }
+    
+    def check_entry_conditions(self, market: MarketCondition) -> Optional[Dict]:
+        """Check if new position should be entered (ignores current position)"""
+        spread = market.cex_funding_rate - market.boros_implied_apr
+        abs_spread = abs(spread)
+        
+        if abs_spread >= self.min_spread:
+            if spread > 0:  # underlying > implied
+                action = "ENTER_LONG"
+                new_position = "LONG"
+                rationale = f"Underlying ({market.cex_funding_rate:.2%}) > Implied ({market.boros_implied_apr:.2%})"
+            else:  # implied > underlying
+                action = "ENTER_SHORT" 
+                new_position = "SHORT"
+                rationale = f"Implied ({market.boros_implied_apr:.2%}) > Underlying ({market.cex_funding_rate:.2%})"
+            
+            return {
+                "strategy_type": "simple_directional",
+                "action": action,
+                "position_type": new_position.lower(),
+                "current_spread": spread,
+                "abs_spread": abs_spread,
+                "rationale": rationale,
+                "expected_apy": abs_spread * 1.0,  # No leverage
+                "risk_score": 0.3,  # Low risk
+                "max_position_size": 50000,  # Conservative
+                "new_position": new_position  # Helper for state management
+            }
+        return None
+    
     def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        """Evaluate directional opportunity with state tracking"""
+        """Two-phase evaluation: exit then entry with position reversal detection"""
         
         positions = self.load_positions()
         current_position = positions.get(market.symbol, "NONE")
         
-        spread = market.cex_funding_rate - market.boros_implied_apr  # underlying - implied
-        abs_spread = abs(spread)
+        # Phase 1: Check exit conditions if we have a position
+        exit_signal = None
+        if current_position != "NONE":
+            exit_signal = self.check_exit_conditions(market, current_position)
         
-        # Entry conditions (no current position)
-        if current_position == "NONE":
-            if abs_spread >= self.min_spread:
-                if spread > 0:  # underlying > implied
-                    action = "ENTER_LONG"
-                    new_position = "LONG"
-                    rationale = f"Underlying ({market.cex_funding_rate:.2%}) > Implied ({market.boros_implied_apr:.2%})"
-                else:  # implied > underlying
-                    action = "ENTER_SHORT" 
-                    new_position = "SHORT"
-                    rationale = f"Implied ({market.boros_implied_apr:.2%}) > Underlying ({market.cex_funding_rate:.2%})"
-                
-                # Update position state
-                positions[market.symbol] = new_position
-                self.save_positions(positions)
-                
-                return {
-                    "strategy_type": "simple_directional",
-                    "action": action,
-                    "position_type": new_position.lower(),
-                    "current_spread": spread,
-                    "abs_spread": abs_spread,
-                    "rationale": rationale,
-                    "expected_apy": abs_spread * 1.0,  # No leverage
-                    "risk_score": 0.3,  # Low risk
-                    "max_position_size": 50000  # Conservative
-                }
+        # Phase 2: Check entry conditions (always check regardless of current position)
+        entry_signal = self.check_entry_conditions(market)
         
-        # Exit conditions (have current position)
-        else:
-            if abs_spread <= self.exit_threshold:
-                action = f"EXIT_{current_position}"
-                rationale = f"Spread narrowing to {abs_spread:.2%} - approaching crossover"
-                
-                # Clear position state
-                positions[market.symbol] = "NONE"
-                self.save_positions(positions)
-                
-                return {
-                    "strategy_type": "simple_directional",
-                    "action": action,
-                    "position_type": current_position.lower(),
-                    "current_spread": spread,
-                    "abs_spread": abs_spread,
-                    "rationale": rationale,
-                    "expected_apy": 0.0,  # Exit, no expected return
-                    "risk_score": 0.1,
-                    "max_position_size": 0  # Closing position
-                }
+        # Phase 3: Determine what to return and update state
+        if exit_signal and entry_signal:
+            # Position reversal: Exit current and enter opposite
+            new_position = entry_signal["new_position"]
+            
+            # Update state to new position
+            positions[market.symbol] = new_position
+            self.save_positions(positions)
+            
+            # Enhance entry signal with reversal information
+            entry_signal["is_reversal"] = True
+            entry_signal["previous_position"] = current_position
+            entry_signal["rationale"] = f"REVERSAL: Exit {current_position} → Enter {new_position}. {entry_signal['rationale']}"
+            del entry_signal["new_position"]  # Clean up helper field
+            return entry_signal
+            
+        elif exit_signal:
+            # Exit only
+            positions[market.symbol] = "NONE"
+            self.save_positions(positions)
+            return exit_signal
+            
+        elif entry_signal and current_position == "NONE":
+            # New entry only (no current position)
+            new_position = entry_signal["new_position"]
+            positions[market.symbol] = new_position
+            self.save_positions(positions)
+            del entry_signal["new_position"]  # Clean up helper field
+            return entry_signal
         
-        return None  # No opportunity (either insufficient spread for entry or not ready to exit)
+        # No action needed
+        return None
 
 class FixedFloatingSwapStrategy:
     """
@@ -386,108 +435,143 @@ class ImpliedAPRBandStrategy:
     def get_bands(self, symbol: str) -> dict:
         return self.bands_by_symbol.get(symbol, self.default_bands)
 
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        bands = self.get_bands(market.symbol)
+    def check_exit_conditions_bands(self, market: MarketCondition, current_position: str, bands: dict) -> Optional[Dict]:
+        """Check if current APR bands position should be exited"""
         apr = market.boros_implied_apr
-
-        # Load current APR-band position state; keep it separate from directional by namespacing key
+        
+        if current_position == "LONG" and apr >= bands["long_exit"]:
+            return {
+                "strategy_type": "implied_apr_bands_long",
+                "action": "EXIT_LONG",
+                "position_type": "long",
+                "current_implied_apr": apr,
+                "target_implied_apr": bands["long_exit"],
+                "expected_move": 0.0,
+                "expected_apy": 0.0,
+                "risk_score": 0.2,
+                "max_position_size": 0,
+                "recommended_leverage": 1.0
+            }
+        elif current_position == "SHORT" and apr <= bands["short_exit"]:
+            return {
+                "strategy_type": "implied_apr_bands_short",
+                "action": "EXIT_SHORT",
+                "position_type": "short",
+                "current_implied_apr": apr,
+                "target_implied_apr": bands["short_exit"],
+                "expected_move": 0.0,
+                "expected_apy": 0.0,
+                "risk_score": 0.2,
+                "max_position_size": 0,
+                "recommended_leverage": 1.0
+            }
+        return None
+    
+    def check_entry_conditions_bands(self, market: MarketCondition, bands: dict) -> Optional[Dict]:
+        """Check if new APR bands position should be entered (ignores current position)"""
+        apr = market.boros_implied_apr
+        
+        # Long setup: buy low APR, target mid band
+        if apr <= bands["long_entry"]:
+            move = max(0.0, bands["long_exit"] - apr)
+            sensitivity = 4.0
+            expected_apy = move * sensitivity
+            
+            return {
+                "strategy_type": "implied_apr_bands_long",
+                "action": "ENTER_LONG",
+                "position_type": "long",
+                "current_implied_apr": apr,
+                "target_implied_apr": bands["long_exit"],
+                "expected_move": move,
+                "expected_apy": expected_apy,
+                "risk_score": 0.5,
+                "max_position_size": min(market.liquidity * 0.03, 250000),
+                "recommended_leverage": 1.0,
+                "dca_step": bands["dca_step"],
+                "max_adds": bands["max_adds"],
+                "stop_loss": None,
+                "take_profit": None,
+                "new_position": "LONG"  # Helper for state management
+            }
+        
+        # Short setup: sell high APR, target back to mid band
+        elif apr >= bands["short_entry"]:
+            move = max(0.0, apr - bands["short_exit"])
+            sensitivity = 4.0
+            expected_apy = move * sensitivity
+            
+            return {
+                "strategy_type": "implied_apr_bands_short",
+                "action": "ENTER_SHORT",
+                "position_type": "short",
+                "current_implied_apr": apr,
+                "target_implied_apr": bands["short_exit"],
+                "expected_move": move,
+                "expected_apy": expected_apy,
+                "risk_score": 0.6,
+                "max_position_size": min(market.liquidity * 0.03, 250000),
+                "recommended_leverage": 1.0,
+                "dca_step": bands["dca_step"],
+                "max_adds": bands["max_adds"],
+                "stop_loss": None,
+                "take_profit": None,
+                "new_position": "SHORT"  # Helper for state management
+            }
+        
+        return None
+    
+    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
+        """Two-phase evaluation: exit then entry with position reversal detection"""
+        bands = self.get_bands(market.symbol)
+        
+        # Load current APR-band position state
         positions = self.load_positions()
         key = f"APR_BANDS:{market.symbol}"
-        current_position = positions.get(key, "NONE")  # NONE | LONG | SHORT
-
-        # ENTRY LOGIC (only if not already in an APR bands position)
-        if current_position == "NONE":
-            # Long setup: buy low APR, target mid band
-            if apr <= bands["long_entry"]:
-                move = max(0.0, bands["long_exit"] - apr)
-                sensitivity = 4.0  # heuristic proxy; tune with live data/backtests
-                expected_apy = move * sensitivity
-
-                positions[key] = "LONG"
-                self.save_positions(positions)
-
-                return {
-                    "strategy_type": "implied_apr_bands_long",
-                    "action": "ENTER_LONG",
-                    "position_type": "long",
-                    "current_implied_apr": apr,
-                    "target_implied_apr": bands["long_exit"],
-                    "expected_move": move,
-                    "expected_apy": expected_apy,
-                    "risk_score": 0.5,  # medium
-                    "max_position_size": min(market.liquidity * 0.03, 250000),
-                    "recommended_leverage": 1.0,
-                    "dca_step": bands["dca_step"],
-                    "max_adds": bands["max_adds"],
-                    "stop_loss": None,
-                    "take_profit": None
-                }
-
-            # Short setup: sell high APR, target back to mid band
-            elif apr >= bands["short_entry"]:
-                move = max(0.0, apr - bands["short_exit"])
-                sensitivity = 4.0
-                expected_apy = move * sensitivity
-
-                positions[key] = "SHORT"
-                self.save_positions(positions)
-
-                return {
-                    "strategy_type": "implied_apr_bands_short",
-                    "action": "ENTER_SHORT",
-                    "position_type": "short",
-                    "current_implied_apr": apr,
-                    "target_implied_apr": bands["short_exit"],
-                    "expected_move": move,
-                    "expected_apy": expected_apy,
-                    "risk_score": 0.6,  # slightly higher risk given potential to be underwater
-                    "max_position_size": min(market.liquidity * 0.03, 250000),
-                    "recommended_leverage": 1.0,
-                    "dca_step": bands["dca_step"],
-                    "max_adds": bands["max_adds"],
-                    "stop_loss": None,
-                    "take_profit": None
-                }
-
-        # EXIT LOGIC (only if currently in an APR bands position)
-        else:
-            if current_position == "LONG":
-                # Exit long when APR reaches the long_exit target (or higher)
-                if apr >= bands["long_exit"]:
-                    positions[key] = "NONE"
-                    self.save_positions(positions)
-
-                    return {
-                        "strategy_type": "implied_apr_bands_long",
-                        "action": "EXIT_LONG",
-                        "position_type": "long",
-                        "current_implied_apr": apr,
-                        "target_implied_apr": bands["long_exit"],
-                        "expected_move": 0.0,
-                        "expected_apy": 0.0,
-                        "risk_score": 0.2,
-                        "max_position_size": 0,
-                        "recommended_leverage": 1.0
-                    }
-            elif current_position == "SHORT":
-                # Exit short when APR falls back to the short_exit target (or lower)
-                if apr <= bands["short_exit"]:
-                    positions[key] = "NONE"
-                    self.save_positions(positions)
-
-                    return {
-                        "strategy_type": "implied_apr_bands_short",
-                        "action": "EXIT_SHORT",
-                        "position_type": "short",
-                        "current_implied_apr": apr,
-                        "target_implied_apr": bands["short_exit"],
-                        "expected_move": 0.0,
-                        "expected_apy": 0.0,
-                        "risk_score": 0.2,
-                        "max_position_size": 0,
-                        "recommended_leverage": 1.0
-                    }
-
+        current_position = positions.get(key, "NONE")
+        
+        # Phase 1: Check exit conditions if we have a position
+        exit_signal = None
+        if current_position != "NONE":
+            exit_signal = self.check_exit_conditions_bands(market, current_position, bands)
+        
+        # Phase 2: Check entry conditions (always check regardless of current position)
+        entry_signal = self.check_entry_conditions_bands(market, bands)
+        
+        # Phase 3: Determine what to return and update state
+        if exit_signal and entry_signal:
+            # Position reversal: Exit current and enter opposite
+            new_position = entry_signal["new_position"]
+            
+            # Update state to new position
+            positions[key] = new_position
+            self.save_positions(positions)
+            
+            # Enhance entry signal with reversal information
+            entry_signal["is_reversal"] = True
+            entry_signal["previous_position"] = current_position
+            
+            # Update rationale to show reversal
+            apr = market.boros_implied_apr
+            entry_signal["rationale"] = f"REVERSAL: Exit {current_position} → Enter {new_position} at {apr:.2%} APR"
+            del entry_signal["new_position"]  # Clean up helper field
+            return entry_signal
+            
+        elif exit_signal:
+            # Exit only
+            positions[key] = "NONE"
+            self.save_positions(positions)
+            return exit_signal
+            
+        elif entry_signal and current_position == "NONE":
+            # New entry only (no current position)
+            new_position = entry_signal["new_position"]
+            positions[key] = new_position
+            self.save_positions(positions)
+            del entry_signal["new_position"]  # Clean up helper field
+            return entry_signal
+        
+        # No action needed
         return None
 
 class DeltaNeutralHedgeStrategy:
