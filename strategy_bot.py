@@ -131,8 +131,8 @@ class StrategyAlertBot:
         """Check if we should refresh data based on interval"""
         return (time.time() - self.last_data_refresh) > self.data_refresh_interval
     
-    def create_market_condition(self, market_data: Dict, symbol: str) -> MarketCondition:
-        """Convert rates.json data to MarketCondition object"""
+    def create_market_condition(self, market_data: Dict, unique_id: str) -> MarketCondition:
+        """Convert rates.json data to MarketCondition object with unique market identification"""
         
         implied_apr = market_data["implied"] / 100  # Convert percentage to decimal
         underlying_apr = market_data["underlying"] / 100  # Convert percentage to decimal
@@ -144,8 +144,9 @@ class StrategyAlertBot:
         raw_text = market_data.get("raw", "")
         liquidity = 1000000  # Default $1M, could parse from Open Interest
         
+        # Use unique_id as symbol for position tracking (e.g., "BTCUSDT_BINANCE_SEP_2025")
         return MarketCondition(
-            symbol=symbol,
+            symbol=unique_id,
             cex_funding_rate=underlying_apr,  # Use underlying APR as the "floating" rate for fixed/floating swaps
             boros_implied_apr=implied_apr,
             spread=spread,  # Preserve sign for directional strategies
@@ -209,25 +210,71 @@ class StrategyAlertBot:
             except UnicodeEncodeError:
                 print(f"[ERROR] Discord webhook error: {e}")
     
-    def send_alert(self, symbol: str, strategy_type: str, opportunity: Dict, market: MarketCondition):
-        """Send trading opportunity alert"""
+    def update_positions_after_conflict_resolution(self, selected_opportunities: list):
+        """Update position state for selected opportunities after global conflict resolution"""
+        positions_updated = False
+        
+        for best_opp in selected_opportunities:
+            if not best_opp:
+                continue
+                
+            opportunity = best_opp.get('opportunity', {})
+            position_key = opportunity.get('position_key')
+            new_position_state = opportunity.get('new_position_state')
+            
+            if position_key and new_position_state is not None:
+                # Load current positions
+                try:
+                    with open('positions_state.json', 'r') as f:
+                        positions = json.load(f)
+                except FileNotFoundError:
+                    positions = {}
+                
+                # Update the position
+                old_state = positions.get(position_key, 'NONE')
+                positions[position_key] = new_position_state
+                
+                # Save updated positions
+                with open('positions_state.json', 'w') as f:
+                    json.dump(positions, f, indent=2)
+                
+                positions_updated = True
+                
+                try:
+                    print(f"📝 Position updated: {position_key} {old_state} → {new_position_state}")
+                except UnicodeEncodeError:
+                    print(f"[POS] Position updated: {position_key} {old_state} -> {new_position_state}")
+        
+        if not positions_updated:
+            try:
+                print(f"ℹ️ No position updates needed")
+            except UnicodeEncodeError:
+                print(f"[INFO] No position updates needed")
+    
+    def send_alert(self, unique_id: str, strategy_type: str, opportunity: Dict, market: MarketCondition, market_data: Dict):
+        """Send trading opportunity alert with enhanced market identification"""
         
         # Use action-aware cooldown key so ENTER and EXIT have independent cooldowns
         action_part = (opportunity.get('action') or '').upper()
-        alert_key = f"{symbol}_{strategy_type}" + (f"_{action_part}" if action_part else "")
+        alert_key = f"{unique_id}_{strategy_type}" + (f"_{action_part}" if action_part else "")
         self.last_alerts[alert_key] = time.time()
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        # Extract market details for display
+        base_symbol = market_data.get('market', 'UNKNOWN')  # BTCUSDT, ETHUSDT
+        exchange = market_data.get('exchange', 'Unknown')   # Binance, Hyperliquid
+        maturity = market_data.get('maturity', 'Unknown')   # 26 Sept 2025, etc.
+        
         try:
             print(f"\n🚨 TRADING OPPORTUNITY ALERT 🚨")
             print(f"⏰ Time: {timestamp}")
-            print(f"📊 Symbol: {symbol}")
+            print(f"📊 Market: {base_symbol} ({exchange} {maturity})")
             print(f"🎯 Strategy: {strategy_type.replace('_', ' ').title()}")
         except UnicodeEncodeError:
             print(f"\n[ALERT] TRADING OPPORTUNITY ALERT")
             print(f"Time: {timestamp}")
-            print(f"Symbol: {symbol}")
+            print(f"Market: {base_symbol} ({exchange} {maturity})")
             print(f"Strategy: {strategy_type.replace('_', ' ').title()}")
         print(f"=" * 50)
         
@@ -257,7 +304,7 @@ class StrategyAlertBot:
         # Also send to Discord if configured
         discord_title = f"🚨 {strategy_type.replace('_', ' ').title()} Alert"
         
-        # Enhanced description with strategy names
+        # Enhanced description with strategy names and market identification
         if strategy_type == "simple_directional":
             action = opportunity.get('action', 'UNKNOWN')
             current_spread = opportunity.get('current_spread', 0)
@@ -265,22 +312,26 @@ class StrategyAlertBot:
             is_reversal = opportunity.get('is_reversal', False)
             previous_position = opportunity.get('previous_position', '')
             
+            market_info = f"{base_symbol} ({exchange} {maturity})"
+            
             if is_reversal:
-                discord_description = f"**🔄 POSITION REVERSAL Alert**\n**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action} (Reversal: {previous_position} → {action.split('_')[1]})\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}\n\n⚡ **URGENT: Close {previous_position} position first, then enter {action.split('_')[1]}!**"
+                discord_description = f"**🔄 POSITION REVERSAL Alert**\n**Strategy:** Simple Directional YU Trading\n**Market:** {market_info}\n**Action:** {action} (Reversal: {previous_position} → {action.split('_')[1]})\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}\n\n⚡ **URGENT: Close {previous_position} position first, then enter {action.split('_')[1]}!**"
             else:
-                discord_description = f"**Strategy:** Simple Directional YU Trading\n**Symbol:** {symbol}\n**Action:** {action}\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+                discord_description = f"**Strategy:** Simple Directional YU Trading\n**Market:** {market_info}\n**Action:** {action}\n**Current Spread:** {current_spread:.2%}\n**Rationale:** {rationale}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         elif strategy_type == "fixed_floating_swap":
             action_type = opportunity.get('strategy_type', 'unknown')
             expected_profit = opportunity.get('expected_profit', 0)
             implied_apr = market.boros_implied_apr
             underlying_apr = market.cex_funding_rate
             
+            market_info = f"{base_symbol} ({exchange} {maturity})"
+            
             if 'short_yu' in action_type:
                 action_desc = f"SHORT YU (receive {implied_apr:.2%}) + LONG underlying (pay {underlying_apr:.2%})"
             else:
                 action_desc = f"LONG YU (pay {implied_apr:.2%}) + SHORT underlying (receive {underlying_apr:.2%})"
                 
-            discord_description = f"**Strategy:** Boros Spread Arbitrage (@ViNc2453)\n**Symbol:** {symbol}\n**Action:** {action_desc}\n**Net Profit:** {expected_profit:.2%} APR\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0"
+            discord_description = f"**Strategy:** Boros Spread Arbitrage (@ViNc2453)\n**Market:** {market_info}\n**Action:** {action_desc}\n**Net Profit:** {expected_profit:.2%} APR\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0"
         elif strategy_type == "implied_apr_bands":
             position_type = opportunity.get('position_type', 'unknown')
             current_apr = opportunity.get('current_implied_apr', 0)
@@ -289,10 +340,12 @@ class StrategyAlertBot:
             is_reversal = opportunity.get('is_reversal', False)
             previous_position = opportunity.get('previous_position', '')
             
+            market_info = f"{base_symbol} ({exchange} {maturity})"
+            
             if action.startswith('EXIT'):
                 discord_description = (
                     f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
-                    f"**Symbol:** {symbol}\n"
+                    f"**Market:** {market_info}\n"
                     f"**Action:** EXIT {position_type.upper()} YU\n"
                     f"**Current APR:** {current_apr:.2%}\n"
                     f"**Exit Target:** {target_apr:.2%}\n"
@@ -303,7 +356,7 @@ class StrategyAlertBot:
                 discord_description = (
                     f"**🔄 POSITION REVERSAL Alert**\n"
                     f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
-                    f"**Symbol:** {symbol}\n"
+                    f"**Market:** {market_info}\n"
                     f"**Action:** {action} (Reversal: {previous_position} → {position_type.upper()})\n"
                     f"**Current APR:** {current_apr:.2%}\n"
                     f"**Target APR:** {target_apr:.2%}\n"
@@ -315,7 +368,7 @@ class StrategyAlertBot:
             else:
                 discord_description = (
                     f"**Strategy:** Implied APR Bands (@DDangleDan)\n"
-                    f"**Symbol:** {symbol}\n"
+                    f"**Market:** {market_info}\n"
                     f"**Action:** Go {position_type.title()} YU\n"
                     f"**Current APR:** {current_apr:.2%}\n"
                     f"**Target APR:** {target_apr:.2%}\n"
@@ -324,7 +377,8 @@ class StrategyAlertBot:
                     f"**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
                 )
         else:
-            discord_description = f"**Symbol:** {symbol}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
+            market_info = f"{base_symbol} ({exchange} {maturity})"
+            discord_description = f"**Market:** {market_info}\n**Expected APY:** {opportunity.get('expected_apy', 0):.2%}\n**Risk Score:** {opportunity.get('risk_score', 0):.2f}/1.0\n**Max Position:** ${opportunity.get('max_position_size', 0):,.0f}"
         
         # Color based on strategy type and reversal status
         is_reversal = opportunity.get('is_reversal', False)
@@ -484,43 +538,78 @@ class StrategyAlertBot:
         is_reversal = opportunity.get("is_reversal", False)
         previous_position = opportunity.get("previous_position", "")
         
-        if is_reversal:
-            print(f"🔄 POSITION REVERSAL: Implied APR Band Trading (@DDangleDan's Strategy)")
-            print(f"   ⚡ REVERSING: {previous_position} → {position_type.upper()}")
-        else:
-            print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
+        try:
+            if is_reversal:
+                print(f"🔄 POSITION REVERSAL: Implied APR Band Trading (@DDangleDan's Strategy)")
+                print(f"   ⚡ REVERSING: {previous_position} → {position_type.upper()}")
+            else:
+                print(f"📊 Implied APR Band Trading (@DDangleDan's Strategy)")
+        except UnicodeEncodeError:
+            if is_reversal:
+                print(f"[REVERSAL] POSITION REVERSAL: Implied APR Band Trading (@DDangleDan's Strategy)")
+                print(f"   [CHANGE] REVERSING: {previous_position} -> {position_type.upper()}")
+            else:
+                print(f"[CHART] Implied APR Band Trading (@DDangleDan's Strategy)")
         print(f"   Current APR: {current_apr:.2%} | Target: {target_apr:.2%} | Expected Move: {expected_move:.2%}")
         
         if action.startswith('EXIT'):
             side = 'LONG' if 'LONG' in action else 'SHORT'
-            print(f"⚪ TRADING PLAN: EXIT {side} YU")
-            print(f"   📍 WHAT TO DO: Close your {side.lower()} YU position")
-            print(f"   📍 RATIONALE: Target reached (~{target_apr:.2%}); realize gains and reset")
+            try:
+                print(f"⚪ TRADING PLAN: EXIT {side} YU")
+                print(f"   📍 WHAT TO DO: Close your {side.lower()} YU position")
+                print(f"   📍 RATIONALE: Target reached (~{target_apr:.2%}); realize gains and reset")
+            except UnicodeEncodeError:
+                print(f"[EXIT] TRADING PLAN: EXIT {side} YU")
+                print(f"   [PLAN] WHAT TO DO: Close your {side.lower()} YU position")
+                print(f"   [REASON] RATIONALE: Target reached (~{target_apr:.2%}); realize gains and reset")
         else:
-            reversal_prefix = "🔄 URGENT REVERSAL: " if is_reversal else ""
+            try:
+                reversal_prefix = "🔄 URGENT REVERSAL: " if is_reversal else ""
+            except:
+                reversal_prefix = "[REVERSAL] URGENT REVERSAL: " if is_reversal else ""
             reversal_note = f" (Close {previous_position} first!)" if is_reversal else ""
             
             if position_type == "long":
-                print(f"🟢 {reversal_prefix}TRADING PLAN: GO LONG YU{reversal_note}")
-                if is_reversal:
-                    print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
-                    print(f"   📍 ENTRY: APR jumped to {current_apr:.2%} - BUY YU now")
-                else:
-                    print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
-                print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
-                print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+                try:
+                    print(f"🟢 {reversal_prefix}TRADING PLAN: GO LONG YU{reversal_note}")
+                    if is_reversal:
+                        print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
+                        print(f"   📍 ENTRY: APR jumped to {current_apr:.2%} - BUY YU now")
+                    else:
+                        print(f"   📍 ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
+                    print(f"   📍 EXIT: Sell when APR reaches ~{target_apr:.2%}")
+                    print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+                except UnicodeEncodeError:
+                    print(f"[LONG] {reversal_prefix}TRADING PLAN: GO LONG YU{reversal_note}")
+                    if is_reversal:
+                        print(f"   [URGENT] URGENT: First close your {previous_position} YU position immediately")
+                        print(f"   [ENTRY] ENTRY: APR jumped to {current_apr:.2%} - BUY YU now")
+                    else:
+                        print(f"   [ENTRY] ENTRY: APR is low ({current_apr:.2%}) - BUY YU now")
+                    print(f"   [EXIT] EXIT: Sell when APR reaches ~{target_apr:.2%}")
+                    print(f"   [DCA] DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
             elif position_type == "short":
-                print(f"🔴 {reversal_prefix}TRADING PLAN: GO SHORT YU{reversal_note}")
-                if is_reversal:
-                    print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
-                    print(f"   📍 ENTRY: APR dropped to {current_apr:.2%} - SELL YU now")
-                else:
-                    print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")
-                print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
-                print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+                try:
+                    print(f"🔴 {reversal_prefix}TRADING PLAN: GO SHORT YU{reversal_note}")
+                    if is_reversal:
+                        print(f"   📍 URGENT: First close your {previous_position} YU position immediately")
+                        print(f"   📍 ENTRY: APR dropped to {current_apr:.2%} - SELL YU now")
+                    else:
+                        print(f"   📍 ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")
+                    print(f"   📍 EXIT: Cover when APR drops to ~{target_apr:.2%}")
+                    print(f"   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
+                except UnicodeEncodeError:
+                    print(f"[SHORT] {reversal_prefix}TRADING PLAN: GO SHORT YU{reversal_note}")
+                    if is_reversal:
+                        print(f"   [URGENT] URGENT: First close your {previous_position} YU position immediately")
+                        print(f"   [ENTRY] ENTRY: APR dropped to {current_apr:.2%} - SELL YU now")
+                    else:
+                        print(f"   [ENTRY] ENTRY: APR is high ({current_apr:.2%}) - SELL YU now")
+                    print(f"   [EXIT] EXIT: Cover when APR drops to ~{target_apr:.2%}")
+                    print(f"   [DCA] DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)")
     
     async def analyze_opportunities(self):
-        """Analyze current rates and identify opportunities"""
+        """Analyze current rates with global ranking and conflict resolution"""
         
         # Check if we need to refresh data first
         if self.should_refresh_data():
@@ -531,131 +620,156 @@ class StrategyAlertBot:
             return
             
         try:
-            print(f"📊 Analyzing {len(rates_data['markets'])} markets...")
+            print(f"📊 Analyzing {len(rates_data['markets'])} markets for best opportunities...")
         except UnicodeEncodeError:
-            print(f"[ANALYSIS] Analyzing {len(rates_data['markets'])} markets...")
+            print(f"[ANALYSIS] Analyzing {len(rates_data['markets'])} markets for best opportunities...")
         
-        opportunities_found = 0
+        # Step 1: Collect ALL opportunities from all markets
+        all_opportunities = []
         
-        # Group markets by symbol to get the best rates for each
-        markets_by_symbol = {}
         for market_data in rates_data['markets']:
-            symbol = market_data['market']
-            if symbol not in markets_by_symbol:
-                markets_by_symbol[symbol] = []
-            markets_by_symbol[symbol].append(market_data)
-        
-        # Analyze each symbol
-        for symbol, market_list in markets_by_symbol.items():
+            unique_id = market_data.get('unique_id', market_data['market'])  # Fallback for old data
+            base_symbol = market_data['market']  # BTCUSDT, ETHUSDT
+            exchange = market_data.get('exchange', 'Unknown')
+            maturity = market_data.get('maturity', 'Unknown')
             
-            # For now, use the market with highest implied APR for analysis
-            best_market = max(market_list, key=lambda x: x['implied'])
+            # Create market condition with unique ID
+            market_condition = self.create_market_condition(market_data, unique_id)
             
-            # Create market condition
-            market_condition = self.create_market_condition(best_market, symbol)
-            
-            print(f"\n--- {symbol} Analysis ---")
+            print(f"\n--- {base_symbol} ({exchange} {maturity}) Analysis ---")
             print(f"Boros Implied APR: {market_condition.boros_implied_apr:.2%}")
-            print(f"Mock CEX Funding: {market_condition.cex_funding_rate:.2%}")
             print(f"Spread: {market_condition.spread:.2%}")
             
-            # Evaluate strategies
-            opportunities = await self.strategy_manager.evaluate_all_strategies(market_condition)
+            # Evaluate strategies (pass exchange for settlement-aware thresholds)
+            opportunities = await self.strategy_manager.evaluate_all_strategies(market_condition, exchange)
             
             if not opportunities:
-                print(f"No strategies triggered for {symbol}")
+                print(f"No strategies triggered")
                 continue
             
+            # Process each opportunity from this market
             for opp in opportunities:
                 strategy_type = opp["strategy"].value
                 expected_apy = opp.get("expected_apy", 0)
-                risk_score = opp.get("risk_score", 1.0)
+                action = (opp.get("action") or "").upper()
                 
-                print(f"\nStrategy: {strategy_type}")
-                print(f"Expected APY: {expected_apy:.2%}")
-                print(f"Risk Score: {risk_score:.2f}")
-                print(f"Expected APY: {expected_apy:.2%} vs Min Threshold: {self.min_expected_move:.2%}")
+                # Apply thresholds before considering for global ranking
+                should_consider = False
                 
-                # Evaluate supported on-chain strategies
                 if strategy_type == "simple_directional":
-                    min_directional_spread = self.config.get("min_directional_spread", 0.005)  # 0.5% minimum spread
+                    min_directional_spread = self.config.get("min_directional_spread", 0.005)
                     abs_spread = opp.get("abs_spread", 0)
-                    action = (opp.get("action") or "").upper()
-
-                    # Always alert on EXIT actions regardless of entry threshold
-                    if action.startswith("EXIT"):
-                        if self.should_send_alert(symbol, strategy_type, action):
-                            self.send_alert(symbol, strategy_type, opp, market_condition)
-                            opportunities_found += 1
-                    else:
-                        if abs_spread >= min_directional_spread:
-                            try:
-                                print(f"✓ Spread threshold met - WOULD ALERT")
-                            except UnicodeEncodeError:
-                                print(f"[CHECK] Spread threshold met - WOULD ALERT")
-                            if self.should_send_alert(symbol, strategy_type, action):
-                                self.send_alert(symbol, strategy_type, opp, market_condition)
-                                opportunities_found += 1
-                        else:
-                            try:
-                                print(f"✗ Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
-                            except UnicodeEncodeError:
-                                print(f"[X] Spread too small ({abs_spread:.2%} < {min_directional_spread:.2%})")
+                    
+                    if action.startswith("EXIT") or abs_spread >= min_directional_spread:
+                        should_consider = True
                         
                 elif strategy_type == "implied_apr_bands":
-                    action = (opp.get("action") or "").upper()
-                    if action.startswith("EXIT"):
-                        # Always alert on EXIT for APR bands
-                        if self.should_send_alert(symbol, strategy_type, action):
-                            self.send_alert(symbol, strategy_type, opp, market_condition)
-                            opportunities_found += 1
-                    else:
-                        if expected_apy >= self.min_expected_move:
-                            try:
-                                print(f"✓ Expected move threshold met - WOULD ALERT")
-                            except UnicodeEncodeError:
-                                print(f"[CHECK] Expected move threshold met - WOULD ALERT")
-                            if self.should_send_alert(symbol, strategy_type, action):
-                                self.send_alert(symbol, strategy_type, opp, market_condition)
-                                opportunities_found += 1
-                        else:
-                            try:
-                                print(f"✗ Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
-                            except UnicodeEncodeError:
-                                print(f"[X] Expected move too small ({expected_apy:.2%} < {self.min_expected_move:.2%})")
+                    if action.startswith("EXIT") or expected_apy >= self.min_expected_move:
+                        should_consider = True
                         
                 elif strategy_type == "fixed_floating_swap":
-                    min_swap_spread = self.config.get("min_swap_spread", 0.02)  # 2% minimum spread
+                    min_swap_spread = self.config.get("min_swap_spread", 0.02)
                     if abs(market_condition.spread) >= min_swap_spread:
-                        try:
-                            print(f"✓ Spread threshold met - WOULD ALERT")
-                        except UnicodeEncodeError:
-                            print(f"[CHECK] Spread threshold met - WOULD ALERT")
-                        if self.should_send_alert(symbol, strategy_type):
-                            self.send_alert(symbol, strategy_type, opp, market_condition)
-                            opportunities_found += 1
-                    else:
-                        try:
-                            print(f"✗ Spread too small ({market_condition.spread:.2%} < {min_swap_spread:.2%})")
-                        except UnicodeEncodeError:
-                            print(f"[X] Spread too small ({market_condition.spread:.2%} < {min_swap_spread:.2%})")
+                        should_consider = True
+                
+                if should_consider:
+                    # Determine direction for ranking
+                    direction = None
+                    if action.startswith("ENTER_LONG") or action.startswith("EXIT_SHORT"):
+                        direction = "LONG"
+                    elif action.startswith("ENTER_SHORT") or action.startswith("EXIT_LONG"):
+                        direction = "SHORT"
+                    
+                    if direction:
+                        # Add to global opportunities list
+                        opportunity_record = {
+                            'unique_id': unique_id,
+                            'base_symbol': base_symbol,
+                            'exchange': exchange,
+                            'maturity': maturity,
+                            'strategy_type': strategy_type,
+                            'direction': direction,
+                            'expected_apy': expected_apy,
+                            'action': action,
+                            'opportunity': opp,
+                            'market_condition': market_condition,
+                            'market_data': market_data,
+                            'is_exit': action.startswith("EXIT")
+                        }
+                        all_opportunities.append(opportunity_record)
                         
-                else:
-                    try:
-                        print(f"✗ Strategy '{strategy_type}' not supported with current data")
-                    except UnicodeEncodeError:
-                        print(f"[X] Strategy '{strategy_type}' not supported with current data")
+                        try:
+                            print(f"✓ {strategy_type}: {direction} {expected_apy:.2%} APY")
+                        except UnicodeEncodeError:
+                            print(f"[QUAL] {strategy_type}: {direction} {expected_apy:.2%} APY")
         
-        if opportunities_found == 0:
+        if not all_opportunities:
             try:
-                print(f"✅ No new opportunities found at {datetime.now().strftime('%H:%M:%S')}")
+                print(f"✅ No qualifying opportunities found at {datetime.now().strftime('%H:%M:%S')}")
             except UnicodeEncodeError:
-                print(f"[INFO] No new opportunities found at {datetime.now().strftime('%H:%M:%S')}")
+                print(f"[INFO] No qualifying opportunities found at {datetime.now().strftime('%H:%M:%S')}")
+            return
+        
+        # Step 2: Global ranking with conflict resolution
+        try:
+            print(f"\n🏆 GLOBAL RANKING & CONFLICT RESOLUTION 🏆")
+        except UnicodeEncodeError:
+            print(f"\n[RANKING] GLOBAL RANKING & CONFLICT RESOLUTION")
+        print(f"Found {len(all_opportunities)} qualifying opportunities")
+        
+        # Sort all opportunities by expected APY (highest first)
+        sorted_opportunities = sorted(all_opportunities, key=lambda x: x['expected_apy'], reverse=True)
+        
+        print(f"\nAll Opportunities (by APY):")
+        for i, opp in enumerate(sorted_opportunities, 1):
+            print(f"{i}. {opp['base_symbol']} ({opp['exchange']}) {opp['direction']} - {opp['expected_apy']:.2%} APY ({opp['strategy_type']})")
+        
+        # Step 3: Select single best opportunity (highest APY)
+        best_opportunity = None
+        
+        if sorted_opportunities:
+            best_opportunity = sorted_opportunities[0]  # Highest APY opportunity
+            try:
+                print(f"🏆 BEST OPPORTUNITY: {best_opportunity['direction']} {best_opportunity['base_symbol']} ({best_opportunity['exchange']}) - {best_opportunity['expected_apy']:.2%} APY")
+            except UnicodeEncodeError:
+                print(f"[BEST] BEST OPPORTUNITY: {best_opportunity['direction']} {best_opportunity['base_symbol']} ({best_opportunity['exchange']}) - {best_opportunity['expected_apy']:.2%} APY")
+        
+        # Step 4: Update positions for selected opportunity (after conflict resolution)
+        self.update_positions_after_conflict_resolution([best_opportunity] if best_opportunity else [])
+        
+        # Step 5: Send alert for the best opportunity only
+        opportunities_sent = 0
+        
+        if best_opportunity and self.should_send_alert(best_opportunity['unique_id'], best_opportunity['strategy_type'], best_opportunity['action']):
+            try:
+                print(f"\n🚨 SENDING ALERT: {best_opportunity['direction']} {best_opportunity['base_symbol']} ({best_opportunity['exchange']}) - {best_opportunity['expected_apy']:.2%}")
+            except UnicodeEncodeError:
+                print(f"\n[ALERT] SENDING ALERT: {best_opportunity['direction']} {best_opportunity['base_symbol']} ({best_opportunity['exchange']}) - {best_opportunity['expected_apy']:.2%}")
+            self.send_alert(
+                best_opportunity['unique_id'], 
+                best_opportunity['strategy_type'], 
+                best_opportunity['opportunity'], 
+                best_opportunity['market_condition'], 
+                best_opportunity['market_data']
+            )
+            opportunities_sent = 1
+        
+        if opportunities_sent == 0:
+            try:
+                print(f"✅ No new alerts sent (all in cooldown) at {datetime.now().strftime('%H:%M:%S')}")
+            except UnicodeEncodeError:
+                print(f"[INFO] No new alerts sent (all in cooldown) at {datetime.now().strftime('%H:%M:%S')}")
         else:
             try:
-                print(f"🎯 Found {opportunities_found} new opportunities!")
+                if opportunities_sent == 1:
+                    print(f"🎯 Sent the best opportunity!")
+                else:
+                    print(f"🎯 Sent {opportunities_sent} best opportunities!")
             except UnicodeEncodeError:
-                print(f"[ALERT] Found {opportunities_found} new opportunities!")
+                if opportunities_sent == 1:
+                    print(f"[ALERT] Sent the best opportunity!")
+                else:
+                    print(f"[ALERT] Sent {opportunities_sent} best opportunities!")
     
     async def run(self):
         """Main bot loop"""

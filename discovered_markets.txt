@@ -1,0 +1,6 @@
+MARKETS = [
+    "BTCUSDT Binance 26 Sept 2025",
+    "ETHUSDT Binance 26 Sept 2025",
+    "BTCUSDT Binance 26 Dec 2025",
+    "ETHUSDT Binance 26 Dec 2025",
+]

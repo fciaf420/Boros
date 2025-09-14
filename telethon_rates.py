@@ -30,6 +30,8 @@ MARKETS: List[str] = [
     "ETHUSDT Binance 26 Sept 2025", 
     "BTCUSDT Binance 26 Dec 2025",
     "ETHUSDT Binance 26 Dec 2025",
+    "BTC-USD Hyperliquid 31 Oct 2025",
+    "ETH-USD Hyperliquid 31 Oct 2025",
 ]
 
 IMPLIED_RE = re.compile(r"Implied\s*APR[:\s]*([\d.]+)%", re.I)
@@ -42,11 +44,14 @@ SHORT_SPREAD_BPS = -50
 
 @dataclass
 class MarketData:
-    market: str
+    market: str  # Normalized symbol (e.g., "BTCUSDT")
     implied: float
     underlying: float
     days: Optional[int]
     raw: str
+    exchange: str  # "Binance" or "Hyperliquid"
+    maturity: str  # "26 Sept 2025", "26 Dec 2025", "31 Oct 2025"
+    unique_id: str  # "BTCUSDT_BINANCE_SEPT_2025"
 
 
 def alert(text: str) -> None:
@@ -153,8 +158,36 @@ async def fetch_market(client: TelegramClient, market_button_text: str) -> Marke
             await client.send_message(TARGET_BOT, "/start")
             await asyncio.sleep(0.4)
 
-    # Extract just the market name (e.g., "BTCUSDT") from full button text
-    market_name = market_button_text.split()[0] if market_button_text else market_button_text
+    # Extract market details from full button text
+    # Example: "BTCUSDT Binance 26 Sept 2025" or "BTC-USD Hyperliquid 31 Oct 2025"
+    parts = market_button_text.split() if market_button_text else []
+    
+    if len(parts) >= 4:
+        symbol_part = parts[0]
+        exchange = parts[1]  # "Binance" or "Hyperliquid"
+        maturity = " ".join(parts[2:])  # "26 Sept 2025" or "31 Oct 2025"
+        
+        # Normalize symbol format
+        if "-USD" in symbol_part and "USDT" not in symbol_part:
+            market_name = symbol_part.replace("-USD", "USDT")
+        else:
+            market_name = symbol_part
+            
+        # Create unique identifier
+        # Convert "26 Sept 2025" -> "SEPT_2025", "26 Dec 2025" -> "DEC_2025", "31 Oct 2025" -> "OCT_2025"
+        maturity_parts = maturity.split()
+        if len(maturity_parts) >= 3:
+            month = maturity_parts[1][:3].upper()  # "Sept" -> "SEP", "Dec" -> "DEC", "Oct" -> "OCT"
+            year = maturity_parts[2]  # "2025"
+            unique_id = f"{market_name}_{exchange.upper()}_{month}_{year}"
+        else:
+            unique_id = f"{market_name}_{exchange.upper()}"
+    else:
+        # Fallback for malformed button text
+        market_name = parts[0] if parts else market_button_text
+        exchange = "UNKNOWN"
+        maturity = "UNKNOWN"
+        unique_id = market_name
     
     return MarketData(
         market=market_name,
@@ -162,6 +195,9 @@ async def fetch_market(client: TelegramClient, market_button_text: str) -> Marke
         underlying=underlying,
         days=days,
         raw=reply.message[:1000],
+        exchange=exchange,
+        maturity=maturity,
+        unique_id=unique_id,
     )
 
 
@@ -179,7 +215,7 @@ async def main() -> None:
         results: List[MarketData] = []
         for i, market in enumerate(MARKETS):
             try:
-                print(f"\n--- Processing market {i+1}/4: {market} ---")
+                print(f"\n--- Processing market {i+1}/{len(MARKETS)}: {market} ---")
                 data = await fetch_market(client, market)
                 results.append(data)
                 try:
@@ -233,6 +269,9 @@ async def main() -> None:
                         "spread": round(d.underlying - d.implied, 6),
                         "spread_bps": round((d.underlying - d.implied) * 100, 3),
                         "raw": d.raw,
+                        "exchange": d.exchange,
+                        "maturity": d.maturity,
+                        "unique_id": d.unique_id,
                     }
                     for d in results
                 ],

@@ -78,8 +78,17 @@ class SimpleDirectionalStrategy:
     def __init__(self):
         self.name = "Simple Directional YU Trading"
         self.risk_level = RiskLevel.LOW
-        self.min_spread = 0.005  # 0.5% minimum spread
-        self.exit_threshold = 0.002  # 0.2% exit threshold
+        # Exchange-specific thresholds due to settlement frequency differences
+        self.thresholds = {
+            "Hyperliquid": {
+                "min_spread": 0.007,    # 0.7% - tighter due to hourly settlements
+                "exit_threshold": 0.001  # 0.1% - faster exits
+            },
+            "Binance": {
+                "min_spread": 0.005,    # 0.5% - standard threshold
+                "exit_threshold": 0.002  # 0.2% - standard exit
+            }
+        }
         self.positions_file = "positions_state.json"
         
     def load_positions(self) -> dict:
@@ -95,19 +104,24 @@ class SimpleDirectionalStrategy:
         with open(self.positions_file, 'w') as f:
             json.dump(positions, f, indent=2)
     
-    def check_exit_conditions(self, market: MarketCondition, current_position: str) -> Optional[Dict]:
+    def get_thresholds(self, exchange: str) -> dict:
+        """Get exchange-specific thresholds"""
+        return self.thresholds.get(exchange, self.thresholds["Binance"])
+    
+    def check_exit_conditions(self, market: MarketCondition, current_position: str, exchange: str = "Binance") -> Optional[Dict]:
         """Check if current position should be exited"""
+        thresholds = self.get_thresholds(exchange)
         spread = market.cex_funding_rate - market.boros_implied_apr
         abs_spread = abs(spread)
         
         # Exit condition 1: Spread narrowing (approaching crossover)
-        if abs_spread <= self.exit_threshold:
+        if abs_spread <= thresholds["exit_threshold"]:
             action = f"EXIT_{current_position}"
             rationale = f"Spread narrowing to {abs_spread:.2%} - approaching crossover"
         
         # Exit condition 2: Position moving strongly against us
-        elif ((current_position == "LONG" and spread <= -self.min_spread) or 
-              (current_position == "SHORT" and spread >= self.min_spread)):
+        elif ((current_position == "LONG" and spread <= -thresholds["min_spread"]) or 
+              (current_position == "SHORT" and spread >= thresholds["min_spread"])):
             action = f"EXIT_{current_position}"
             if current_position == "LONG":
                 rationale = f"Strong contrary signal: Implied > Underlying by {abs_spread:.2%} - exit LONG"
@@ -129,12 +143,13 @@ class SimpleDirectionalStrategy:
             "max_position_size": 0  # Closing position
         }
     
-    def check_entry_conditions(self, market: MarketCondition) -> Optional[Dict]:
+    def check_entry_conditions(self, market: MarketCondition, exchange: str = "Binance") -> Optional[Dict]:
         """Check if new position should be entered (ignores current position)"""
+        thresholds = self.get_thresholds(exchange)
         spread = market.cex_funding_rate - market.boros_implied_apr
         abs_spread = abs(spread)
         
-        if abs_spread >= self.min_spread:
+        if abs_spread >= thresholds["min_spread"]:
             if spread > 0:  # underlying > implied
                 action = "ENTER_LONG"
                 new_position = "LONG"
@@ -158,30 +173,29 @@ class SimpleDirectionalStrategy:
             }
         return None
     
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
+    def evaluate_opportunity(self, market: MarketCondition, exchange: str = "Binance") -> Optional[Dict]:
         """Two-phase evaluation: exit then entry with position reversal detection"""
         
         positions = self.load_positions()
-        current_position = positions.get(market.symbol, "NONE")
+        key = f"SIMPLE_DIRECTIONAL:{market.symbol}"
+        current_position = positions.get(key, "NONE")
         
         # Phase 1: Check exit conditions if we have a position
         exit_signal = None
         if current_position != "NONE":
-            exit_signal = self.check_exit_conditions(market, current_position)
+            exit_signal = self.check_exit_conditions(market, current_position, exchange)
         
         # Phase 2: Check entry conditions (always check regardless of current position)
-        entry_signal = self.check_entry_conditions(market)
+        entry_signal = self.check_entry_conditions(market, exchange)
         
-        # Phase 3: Determine what to return and update state
+        # Phase 3: Determine what to return (NO position updates here - global ranking handles that)
         if exit_signal and entry_signal:
             # Position reversal: Exit current and enter opposite
             new_position = entry_signal["new_position"]
             
-            # Update state to new position
-            positions[market.symbol] = new_position
-            self.save_positions(positions)
-            
-            # Enhance entry signal with reversal information
+            # Add position update info for global ranking to handle
+            entry_signal["position_key"] = key
+            entry_signal["new_position_state"] = new_position
             entry_signal["is_reversal"] = True
             entry_signal["previous_position"] = current_position
             entry_signal["rationale"] = f"REVERSAL: Exit {current_position} → Enter {new_position}. {entry_signal['rationale']}"
@@ -189,16 +203,16 @@ class SimpleDirectionalStrategy:
             return entry_signal
             
         elif exit_signal:
-            # Exit only
-            positions[market.symbol] = "NONE"
-            self.save_positions(positions)
+            # Exit only - add position update info for global ranking
+            exit_signal["position_key"] = key
+            exit_signal["new_position_state"] = "NONE"
             return exit_signal
             
         elif entry_signal and current_position == "NONE":
-            # New entry only (no current position)
+            # New entry only (no current position) - add position update info
             new_position = entry_signal["new_position"]
-            positions[market.symbol] = new_position
-            self.save_positions(positions)
+            entry_signal["position_key"] = key
+            entry_signal["new_position_state"] = new_position
             del entry_signal["new_position"]  # Clean up helper field
             return entry_signal
         
@@ -538,16 +552,14 @@ class ImpliedAPRBandStrategy:
         # Phase 2: Check entry conditions (always check regardless of current position)
         entry_signal = self.check_entry_conditions_bands(market, bands)
         
-        # Phase 3: Determine what to return and update state
+        # Phase 3: Determine what to return (NO position updates here - global ranking handles that)
         if exit_signal and entry_signal:
             # Position reversal: Exit current and enter opposite
             new_position = entry_signal["new_position"]
             
-            # Update state to new position
-            positions[key] = new_position
-            self.save_positions(positions)
-            
-            # Enhance entry signal with reversal information
+            # Add position update info for global ranking to handle
+            entry_signal["position_key"] = key
+            entry_signal["new_position_state"] = new_position
             entry_signal["is_reversal"] = True
             entry_signal["previous_position"] = current_position
             
@@ -558,16 +570,16 @@ class ImpliedAPRBandStrategy:
             return entry_signal
             
         elif exit_signal:
-            # Exit only
-            positions[key] = "NONE"
-            self.save_positions(positions)
+            # Exit only - add position update info for global ranking
+            exit_signal["position_key"] = key
+            exit_signal["new_position_state"] = "NONE"
             return exit_signal
             
         elif entry_signal and current_position == "NONE":
-            # New entry only (no current position)
+            # New entry only (no current position) - add position update info
             new_position = entry_signal["new_position"]
-            positions[key] = new_position
-            self.save_positions(positions)
+            entry_signal["position_key"] = key
+            entry_signal["new_position_state"] = new_position
             del entry_signal["new_position"]  # Clean up helper field
             return entry_signal
         
@@ -676,13 +688,13 @@ class StrategyManager:
         self.max_total_exposure = 5000000  # $5M total exposure limit
         self.max_positions_per_strategy = 3
         
-    async def evaluate_all_strategies(self, market: MarketCondition) -> List[Dict]:
+    async def evaluate_all_strategies(self, market: MarketCondition, exchange: str = "Binance") -> List[Dict]:
         """Evaluate all strategies for given market conditions"""
         
         opportunities = []
         
-        # Simple Directional Strategy
-        directional_opp = self.strategies[StrategyType.SIMPLE_DIRECTIONAL].evaluate_opportunity(market)
+        # Simple Directional Strategy (exchange-aware)
+        directional_opp = self.strategies[StrategyType.SIMPLE_DIRECTIONAL].evaluate_opportunity(market, exchange)
         if directional_opp:
             directional_opp["strategy"] = StrategyType.SIMPLE_DIRECTIONAL
             opportunities.append(directional_opp)
