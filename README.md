@@ -5,18 +5,18 @@ Python utilities for fetching market APR data from the Pendle Boros Telegram bot
 ## Features
 
 ### Data Collection
-- 📊 **Market Data Extraction**: Fetches Implied and Underlying APR rates from all available Pendle markets
+- 📊 **Multi-Exchange Support**: Fetches data from 6 markets across Binance and Hyperliquid
 - 🤖 **Automated Navigation**: Intelligently clicks through Telegram bot inline keyboards
 - 📈 **Spread Analysis**: Calculates spreads and identifies LONG/SHORT trading opportunities
-- 💾 **JSON Output**: Structured data export for further analysis
+- 💾 **JSON Output**: Structured data with unique market identification
 - 🛡️ **Error Handling**: Robust navigation with retry logic and Unicode support
 
 ### Strategy Bot
-- 🎯 **Automated Strategy Detection**: Monitors rates and alerts on trading opportunities
-- 📋 **Multiple Strategies**: Supports Implied APR Bands and Fixed/Floating Swaps
-- 🔔 **Discord Integration**: Rich embed alerts with color coding and detailed info
-- ⚙️ **Configurable Intervals**: Environment-controlled data refresh timing
-- 🚨 **Smart Alerting**: Cooldown periods to prevent spam notifications
+- 🎯 **Single-Position Focus**: Global ranking system selects only the best opportunity across all markets
+- 📋 **Dual Strategy Support**: Implied APR Bands + Simple Directional with settlement-aware thresholds
+- ⚡ **Settlement-Aware**: Exchange-specific thresholds (Hyperliquid hourly vs Binance 8-hour)
+- 🔔 **Discord Integration**: Rich embed alerts with market identification and detailed info
+- 🚫 **Conflict Prevention**: Advanced architecture prevents opposing positions on same market
 - 🔄 **Automatic Data Refresh**: Fetches fresh data from Telegram periodically
 
 ## Prerequisites
@@ -146,11 +146,13 @@ python telethon_rates.py
 The script will:
 1. 🔐 Authenticate with Telegram (first run only)
 2. 🤖 Navigate to the Boros bot
-3. 📊 Fetch data from all 4 available markets:
+3. 📊 Fetch data from all 6 available markets:
    - BTCUSDT Binance 26 Sept 2025
    - ETHUSDT Binance 26 Sept 2025  
    - BTCUSDT Binance 26 Dec 2025
    - ETHUSDT Binance 26 Dec 2025
+   - BTCUSDT Hyperliquid 31 Oct 2025
+   - ETHUSDT Hyperliquid 31 Oct 2025
 4. 📈 Calculate spreads and identify opportunities
 5. 💾 Save results to `rates.json`
 6. 🔔 Send alerts (if configured)
@@ -167,37 +169,44 @@ python strategy_bot.py test
 
 The strategy bot will:
 1. 🔄 **Auto-refresh data** every 30 minutes (configurable via `DATA_REFRESH_INTERVAL_SECONDS`)
-2. 🎯 **Analyze strategies** after each data refresh:
-   - **Implied APR Bands**: Long when APR ≤6%, Short when APR ≥8%
-   - **Fixed/Floating Swaps**: Alert on spreads ≥10%
-3. 🚨 **Send alerts** via console and Discord (if webhook configured)
-4. ⏰ **Smart cooldowns** prevent alert spam (30-minute default)
+2. 🎯 **Global ranking analysis** across all 6 markets using 2 strategies:
+   - **Implied APR Bands**: Long when APR ≤6%, Short when APR ≥8% (target bands: 6.8-7%)
+   - **Simple Directional**: Settlement-aware thresholds (Hyperliquid: 0.7%/0.1%, Binance: 0.5%/0.2%)
+3. 🏆 **Best opportunity selection**: Only the highest APY opportunity across all markets gets selected
+4. 🚨 **Single alert system**: Maximum 1 active position out of 12 possible positions
+5. ⏰ **Smart cooldowns** prevent alert spam (30-minute default)
 
 ### Sample Output
 
 **Console Output:**
 ```
---- Processing market 1/4: BTCUSDT Binance 26 Sept 2025 ---
+--- BTCUSDT (Binance 26 Sept 2025) Analysis ---
 [SUCCESS] Fetched BTCUSDT: Implied 7.29% | Underlying 10.02%
+Boros Implied APR: 7.29%
+Spread: 2.73%
+✓ simple_directional: LONG 2.73% APY
 
-[ALERT] LONG candidate (carry +):
-BTCUSDT
-Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
+🏆 GLOBAL RANKING & CONFLICT RESOLUTION 🏆
+Found 5 qualifying opportunities
+🏆 BEST OPPORTUNITY: LONG BTCUSDT (Binance) - 2.73% APY
 ```
 
 **JSON Output (`rates.json`):**
 ```json
 {
-  "generated_at": "2025-09-08T00:03:31.152289+00:00",
+  "generated_at": "2025-09-14T23:05:23.955774+00:00",
   "markets": [
     {
       "market": "BTCUSDT",
-      "implied": 7.29,
-      "underlying": 10.02,
+      "implied": 7.16,
+      "underlying": 8.05,
       "days": null,
-      "spread": 2.73,
-      "spread_bps": 273.0,
-      "raw": "📌 Market info\n\nBTCUSDT Binance 26 Sept 2025..."
+      "spread": 0.89,
+      "spread_bps": 89.0,
+      "raw": "📌 Market info\n\nBTCUSDT Binance 26 Sept 2025...",
+      "exchange": "Binance",
+      "maturity": "26 Sept 2025",
+      "unique_id": "BTCUSDT_BINANCE_SEP_2025"
     }
   ]
 }
@@ -208,25 +217,53 @@ Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
 🤖 Strategy Alert Bot initialized
 📊 Monitoring: rates.json
 🔄 Data refresh: 1800s
-📈 Min expected move: 1.0%
+📈 Min expected move: 0.5%
+
+🚨 SENDING ALERT: SHORT ETHUSDT (Hyperliquid) - 18.64%
 
 🚨 TRADING OPPORTUNITY ALERT 🚨
-⏰ Time: 2025-09-08 15:30:45
-📊 Symbol: ETHUSDT
+⏰ Time: 2025-09-14 14:42:14
+📊 Market: ETHUSDT (Hyperliquid 31 Oct 2025)
 🎯 Strategy: Implied Apr Bands
 ==================================================
 📊 Implied APR Band Trading (@DDangleDan's Strategy)
-   Current APR: 5.80%
-   Target APR: 6.85%
-🟢 RECOMMENDED ACTION: GO LONG YU
-   APR is low (5.80%) - BUY YU
-   Exit target: ~6.85%
-   Expected move: 1.05%
+   Current APR: 11.46% | Target: 6.80% | Expected Move: 4.66%
+🔴 TRADING PLAN: GO SHORT YU
+   📍 ENTRY: APR is high (11.46%) - SELL YU now
+   📍 EXIT: Cover when APR drops to ~6.80%
+   📍 DCA SCALING: Add 25% more every +25bps move against you (max 3 adds)
 ==================================================
-💰 Expected APY: 4.20%
-⚖️ Risk Score: 0.50/1.0
-💵 Max Position: $75,000
+💰 Expected APY: 18.64%
+⚖️ Risk Score: 0.60/1.0
+💵 Max Position: $30,000
 🔧 Leverage: 1.0x
+
+🎯 Sent the best opportunity!
+```
+
+## Advanced Architecture
+
+### Single-Position Global Ranking
+The system evaluates **all opportunities across all markets simultaneously** and selects only the **highest APY opportunity**:
+- **12 Total Positions**: 2 strategies × 6 markets = 12 possible positions
+- **1 Active Position**: Only the best opportunity is selected at any time
+- **No Conflicts**: Impossible to have opposing strategies on the same market
+- **Dynamic Switching**: When current position exits, all opportunities compete again
+
+### Settlement-Aware Thresholds
+Different exchanges have different funding settlement frequencies:
+- **Hyperliquid (Hourly)**: Tighter thresholds due to 8x more frequent settlements
+  - Entry: 0.7% minimum spread (vs 0.5% for Binance)
+  - Exit: 0.1% threshold (vs 0.2% for Binance)
+- **Binance (8-hour)**: Standard thresholds with more time for spreads to reverse
+
+### Position State Management
+Positions are tracked with unique identifiers:
+```json
+{
+  "APR_BANDS:ETHUSDT_HYPERLIQUID_OCT_2025": "SHORT",
+  "SIMPLE_DIRECTIONAL:BTCUSDT_BINANCE_SEP_2025": "NONE"
+}
 ```
 
 ## Trading Signal Interpretation
@@ -240,8 +277,9 @@ Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
 - **📊 Implied APR Bands**: Based on @DDangleDan's strategy
   - **Long**: APR ≤6.0% (target: 6.8-7.0%)
   - **Short**: APR ≥8.0% (target: 6.0-6.8%)
-- **📊 Fixed/Floating Swaps**: Based on @ViNc2453's arbitrage
-  - **Alert**: Spread ≥10% between implied and underlying rates
+- **📊 Simple Directional**: Settlement-aware spread trading
+  - **Hyperliquid**: Entry ≥0.7%, Exit ≤0.1%
+  - **Binance**: Entry ≥0.5%, Exit ≤0.2%
 
 ## Troubleshooting
 
@@ -266,15 +304,18 @@ Implied: 7.29% | Underlying: 10.02% (Spread: +2.73%)
 ### File Structure
 ```
 Boros/
-├── telethon_rates.py      # Data collection script
-├── strategy_bot.py        # Automated strategy monitoring bot
-├── strats.py             # Trading strategy framework
-├── .env                   # Your credentials (keep private!)
-├── .env.example          # Template for configuration
-├── requirements.txt       # Python dependencies
-├── rates.json            # Output data (generated)
-├── user_session.session  # Auth session (auto-generated)
-└── CLAUDE.md             # Developer documentation
+├── telethon_rates.py         # Data collection script (6 markets)
+├── strategy_bot.py           # Single-position global ranking bot
+├── strats.py                # Settlement-aware strategy framework
+├── discover_markets.py       # Market discovery utility
+├── .env                      # Your credentials (keep private!)
+├── .env.example             # Template for configuration
+├── requirements.txt          # Python dependencies
+├── rates.json               # Market data with unique IDs (generated)
+├── positions_state.json     # Active position tracking (generated)
+├── discovered_markets.txt   # Market discovery results (generated)
+├── user_session.session     # Auth session (auto-generated)
+└── CLAUDE.md                # Developer documentation
 ```
 
 ## Security Notes
