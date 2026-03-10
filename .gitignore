@@ -3,3 +3,12 @@ __pycache__/
 .claude/
 debug_*.txt
 user_session.session
+node_modules/
+dist/
+data/
+tmp/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+tmp/sdk-inspect/package/
+tmp/sdk-inspect/*.tgz
