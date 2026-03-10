@@ -201,6 +201,35 @@ export class BorosApiClient {
     };
   }
 
+  public async fetchActivePositions(userAddress: string, accountId: number): Promise<Array<Record<string, unknown>>> {
+    const data = await this.request<{
+      collaterals: Array<{
+        tokenId: number;
+        isolatedPositions: Array<{
+          marketPositions: Array<Record<string, unknown>>;
+        }>;
+        crossPosition: {
+          marketPositions: Array<Record<string, unknown>>;
+        };
+      }>;
+    }>(`/v1/collaterals/summary?userAddress=${userAddress}&accountId=${accountId}`);
+
+    const positions: Array<Record<string, unknown>> = [];
+    for (const collateral of data.collaterals ?? []) {
+      // Cross margin positions
+      for (const pos of collateral.crossPosition?.marketPositions ?? []) {
+        positions.push({ ...pos, tokenId: collateral.tokenId });
+      }
+      // Isolated positions
+      for (const isolated of collateral.isolatedPositions ?? []) {
+        for (const pos of isolated.marketPositions ?? []) {
+          positions.push({ ...pos, tokenId: collateral.tokenId });
+        }
+      }
+    }
+    return positions;
+  }
+
   private parseMarketSummary(row: Record<string, unknown>): MarketSummary {
     const imData = row.imData as Record<string, unknown>;
     const metadata = row.metadata as Record<string, unknown>;

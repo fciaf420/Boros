@@ -1,5 +1,6 @@
 import { BorosApiClient } from "./borosApi.js";
 import { loadConfig } from "./config.js";
+import { CopyTrader } from "./copyTrade.js";
 import { RuntimeStore } from "./db.js";
 import { RelativeValueTrader } from "./engine.js";
 import type { CycleSummary } from "./types.js";
@@ -53,10 +54,31 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const store = new RuntimeStore(config.sqlitePath);
   const api = new BorosApiClient({ baseUrl: config.apiBaseUrl });
-  const trader = new RelativeValueTrader(config, api, store);
   const runOnceOnly = process.argv.includes("--once") || process.env.BOROS_RUN_ONCE === "true";
 
   console.log(`[boros] mode=${config.mode} db=${config.sqlitePath}`);
+
+  if (config.copyTrade.enabled) {
+    const copyTrader = new CopyTrader(config, api, store);
+
+    process.on("SIGINT", () => {
+      copyTrader.stop();
+      process.exit(0);
+    });
+    process.on("SIGTERM", () => {
+      copyTrader.stop();
+      process.exit(0);
+    });
+
+    if (runOnceOnly) {
+      await copyTrader.runOnce();
+    } else {
+      await copyTrader.start();
+    }
+    return;
+  }
+
+  const trader = new RelativeValueTrader(config, api, store);
 
   const run = async () => {
     try {

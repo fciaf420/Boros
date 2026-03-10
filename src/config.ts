@@ -1,3 +1,4 @@
+import type { CopyTradeConfig } from "./types.js";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 
@@ -97,6 +98,7 @@ export interface TraderConfig {
   accountId?: number;
   rootAddress?: `0x${string}`;
   privateKey?: `0x${string}`;
+  copyTrade: CopyTradeConfig;
 }
 
 export function loadConfig(cwd = process.cwd()): TraderConfig {
@@ -153,5 +155,15 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
     accountId: process.env.BOROS_ACCOUNT_ID ? Number(process.env.BOROS_ACCOUNT_ID) : undefined,
     rootAddress: process.env.BOROS_ROOT_ADDRESS as `0x${string}` | undefined,
     privateKey: process.env.BOROS_PRIVATE_KEY as `0x${string}` | undefined,
+    copyTrade: {
+      enabled: getOptionalBoolean("BOROS_COPY_TRADE_ENABLED", false),
+      targetAddress: (process.env.BOROS_COPY_TRADE_TARGET_ADDRESS ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      targetAccountId: process.env.BOROS_COPY_TRADE_TARGET_ACCOUNT_ID ? Number(process.env.BOROS_COPY_TRADE_TARGET_ACCOUNT_ID) : undefined,
+      pollingMs: getOptionalNumber("BOROS_COPY_TRADE_POLLING_MS", 10_000),
+      sizeRatio: getOptionalNumber("BOROS_COPY_TRADE_SIZE_RATIO", 1.0),
+      maxNotionalUsd: getOptionalNumber("BOROS_COPY_TRADE_MAX_NOTIONAL_USD", 5_000),
+      maxSlippage: getOptionalNumber("BOROS_COPY_TRADE_MAX_SLIPPAGE", 0.10),
+      discordWebhookUrl: process.env.BOROS_COPY_TRADE_DISCORD_WEBHOOK_URL || undefined,
+    },
   };
 }

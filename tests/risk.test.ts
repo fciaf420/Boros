@@ -43,6 +43,14 @@ const config: TraderConfig = {
   trailingStopGivebackPct: 0.1,
   paperAssumeTakerEntry: true,
   dryRun: false,
+  copyTrade: {
+    enabled: false,
+    targetAddress: "0x0000000000000000000000000000000000000000",
+    pollingMs: 10_000,
+    sizeRatio: 1.0,
+    maxNotionalUsd: 5_000,
+    maxSlippage: 0.10,
+  },
 };
 
 function makePosition(): OpenPosition {

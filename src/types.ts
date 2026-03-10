@@ -209,3 +209,47 @@ export interface CycleSummary {
   skipReasonCounts: Array<{ reason: string; count: number }>;
   actions: CycleAction[];
 }
+
+export type DeltaAction = "ENTER" | "EXIT" | "INCREASE" | "DECREASE";
+
+export interface CopyTradeConfig {
+  enabled: boolean;
+  targetAddress: `0x${string}`;
+  targetAccountId?: number;
+  pollingMs: number;
+  sizeRatio: number;
+  maxNotionalUsd: number;
+  maxSlippage: number;
+  discordWebhookUrl?: string;
+}
+
+export interface TargetPositionSnapshot {
+  marketId: number;
+  side: TradeSide;
+  sizeBase: number;
+  sizeBase18: string;
+  entryApr: number;
+  currentApr: number;
+}
+
+export interface TargetPositionDelta {
+  action: DeltaAction;
+  marketId: number;
+  side: TradeSide;
+  sizeChangeBase: number;
+  targetNewSizeBase: number;
+  targetEntryApr: number;
+}
+
+export interface CopyTradeRecord {
+  id: string;
+  deltaAction: DeltaAction;
+  targetMarketId: number;
+  targetSide: TradeSide;
+  targetSizeBase: number;
+  ourClientOrderId?: string;
+  ourSizeBase: number;
+  status: "EXECUTED" | "SKIPPED" | "FAILED";
+  reason?: string;
+  timestamp: number;
+}

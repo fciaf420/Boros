@@ -1,0 +1,99 @@
+import type { BorosApiClient } from "./borosApi.js";
+import type { CopyTradeConfig, MarketSummary, TargetPositionDelta, TradeCandidate } from "./types.js";
+import { toBase18 } from "./utils.js";
+
+export class CopyExecutor {
+  constructor(
+    private readonly config: CopyTradeConfig,
+    private readonly api: BorosApiClient,
+  ) {}
+
+  computeCopySize(targetSizeBase: number): number {
+    const scaled = targetSizeBase * this.config.sizeRatio;
+    // We can't directly cap by notional here since we don't know the asset price yet,
+    // so return the scaled size. Notional cap is applied in buildCopyCandidate.
+    return scaled;
+  }
+
+  async buildCopyCandidate(
+    delta: TargetPositionDelta,
+    market: MarketSummary,
+  ): Promise<TradeCandidate> {
+    // Map DeltaAction to ActionType
+    const action = delta.action === "ENTER" ? "ENTER"
+      : delta.action === "EXIT" ? "EXIT"
+      : delta.action === "INCREASE" ? "ADD"
+      : "EXIT"; // DECREASE maps to EXIT (partial)
+
+    // For ENTER/INCREASE we use the delta's sizeChangeBase; for EXIT/DECREASE we also use sizeChangeBase
+    let sizeBase = this.computeCopySize(delta.sizeChangeBase);
+
+    // Apply notional cap
+    const notionalUsd = sizeBase * market.assetMarkPrice;
+    if (notionalUsd > this.config.maxNotionalUsd) {
+      sizeBase = this.config.maxNotionalUsd / market.assetMarkPrice;
+    }
+
+    const sizeBase18 = toBase18(sizeBase);
+    const finalNotionalUsd = sizeBase * market.assetMarkPrice;
+
+    // Use taker for copy trades (we want immediate fills)
+    const orderIntent = "taker" as const;
+
+    // Determine order APR from order book
+    const orderBook = await this.api.fetchOrderBook(market.marketId);
+    let orderApr: number;
+    if (delta.side === "LONG") {
+      // Buying long means taking the ask (short side of book)
+      orderApr = orderBook.bestShortTick ?? market.bestAsk;
+    } else {
+      // Buying short means taking the bid (long side of book)
+      orderApr = orderBook.bestLongTick ?? market.bestBid;
+    }
+
+    // Check slippage vs target's entry APR
+    const slippage = Math.abs(orderApr - delta.targetEntryApr);
+    if (slippage > this.config.maxSlippage) {
+      // Still build the candidate but note it in rationale - caller decides to skip
+    }
+
+    // Simulate the order for margin/fee data
+    // tif=2 is FILL_OR_KILL
+    const simulation = await this.api.simulateOrder({
+      marketId: market.marketId,
+      side: delta.side,
+      sizeBase18,
+      tif: 2,
+      slippage: this.config.maxSlippage,
+    });
+
+    const rationale = `Copy trade: ${delta.action} ${delta.side} on market ${market.marketId}` +
+      ` | target size change: ${delta.sizeChangeBase.toFixed(4)}` +
+      ` | our size: ${sizeBase.toFixed(4)}` +
+      ` | ratio: ${this.config.sizeRatio}` +
+      (slippage > this.config.maxSlippage ? ` | WARNING: slippage ${(slippage * 100).toFixed(2)}% exceeds max` : "");
+
+    return {
+      marketId: market.marketId,
+      tokenId: market.tokenId,
+      isIsolatedOnly: market.isIsolatedOnly,
+      side: delta.side,
+      action,
+      orderIntent,
+      edgeBps: 0, // Copy trades don't have edge-based logic
+      netEdgeBps: 0,
+      targetApr: delta.targetEntryApr,
+      orderApr,
+      sizeBase,
+      sizeBase18,
+      notionalUsd: finalNotionalUsd,
+      plannedMarginUsd: simulation.marginRequiredUsd,
+      simulation,
+      rationale,
+    };
+  }
+
+  isWithinSlippage(delta: TargetPositionDelta, orderApr: number): boolean {
+    return Math.abs(orderApr - delta.targetEntryApr) <= this.config.maxSlippage;
+  }
+}

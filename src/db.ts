@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import type { ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TradeCandidate } from "./types.js";
+import type { CopyTradeRecord, ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TargetPositionSnapshot, TradeCandidate } from "./types.js";
 
 function safeJsonStringify(value: unknown): string {
   return JSON.stringify(value, (_key, innerValue) =>
@@ -127,6 +127,27 @@ export class RuntimeStore {
       CREATE TABLE IF NOT EXISTS runtime_state (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS copy_target_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at INTEGER NOT NULL,
+        target_address TEXT NOT NULL,
+        positions_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS copy_trade_records (
+        id TEXT PRIMARY KEY,
+        recorded_at INTEGER NOT NULL,
+        delta_action TEXT NOT NULL,
+        target_market_id INTEGER NOT NULL,
+        target_side TEXT NOT NULL,
+        target_size_base REAL NOT NULL,
+        our_client_order_id TEXT,
+        our_size_base REAL NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        raw_json TEXT NOT NULL
       );
     `);
 
@@ -548,5 +569,36 @@ export class RuntimeStore {
 
   public saveRiskState(state: RiskState): void {
     this.setRuntimeValue("risk_state", state);
+  }
+
+  public saveTargetSnapshot(targetAddress: string, positions: TargetPositionSnapshot[]): void {
+    this.db.prepare(`
+      INSERT INTO copy_target_snapshots (recorded_at, target_address, positions_json)
+      VALUES (?, ?, ?)
+    `).run(Math.floor(Date.now() / 1000), targetAddress, JSON.stringify(positions));
+  }
+
+  public saveCopyTradeRecord(record: CopyTradeRecord): void {
+    this.db.prepare(`
+      INSERT INTO copy_trade_records (
+        id, recorded_at, delta_action, target_market_id, target_side,
+        target_size_base, our_client_order_id, our_size_base, status, reason, raw_json
+      ) VALUES (
+        @id, @recordedAt, @deltaAction, @targetMarketId, @targetSide,
+        @targetSizeBase, @ourClientOrderId, @ourSizeBase, @status, @reason, @rawJson
+      )
+    `).run({
+      id: record.id,
+      recordedAt: record.timestamp,
+      deltaAction: record.deltaAction,
+      targetMarketId: record.targetMarketId,
+      targetSide: record.targetSide,
+      targetSizeBase: record.targetSizeBase,
+      ourClientOrderId: record.ourClientOrderId ?? null,
+      ourSizeBase: record.ourSizeBase,
+      status: record.status,
+      reason: record.reason ?? null,
+      rawJson: JSON.stringify(record),
+    });
   }
 }
