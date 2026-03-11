@@ -172,7 +172,11 @@ export class CopyTrader {
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`[copy-trade] FAIL ${delta.action} market=${delta.marketId}: ${reason}`);
+      const isBelowMinimum = reason.includes("below $") && reason.includes("minimum");
+      const status = isBelowMinimum ? "SKIPPED" as const : "FAILED" as const;
+      const logFn = isBelowMinimum ? console.log : console.error;
+      const label = isBelowMinimum ? "SKIP" : "FAIL";
+      logFn(`[copy-trade] ${label} ${delta.action} market=${delta.marketId}: ${reason}`);
       return {
         id: recordId,
         deltaAction: delta.action,
@@ -180,7 +184,7 @@ export class CopyTrader {
         targetSide: delta.side,
         targetSizeBase: delta.targetNewSizeBase,
         ourSizeBase: 0,
-        status: "FAILED",
+        status,
         reason,
         timestamp: Math.floor(Date.now() / 1000),
       };

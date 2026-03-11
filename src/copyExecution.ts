@@ -37,18 +37,29 @@ export class CopyExecutor {
     const sizeBase18 = toBase18(sizeBase);
     const finalNotionalUsd = sizeBase * market.assetMarkPrice;
 
+    // Skip orders below exchange minimum
+    const MIN_ORDER_USD = 10;
+    if (finalNotionalUsd < MIN_ORDER_USD) {
+      throw new Error(`Order notional $${finalNotionalUsd.toFixed(2)} below $${MIN_ORDER_USD} minimum`);
+    }
+
     // Use taker for copy trades (we want immediate fills)
     const orderIntent = "taker" as const;
 
-    // Determine order APR from order book
+    // Determine order APR and tick from order book
+    // orderApr = real APR from market (for slippage checks)
+    // orderTick = raw tick index from order book (for limitTick on the order)
     const orderBook = await this.api.fetchOrderBook(market.marketId);
     let orderApr: number;
+    let orderTick: number | undefined;
     if (delta.side === "LONG") {
       // Buying long means taking the ask (short side of book)
-      orderApr = orderBook.bestShortTick ?? market.bestAsk;
+      orderApr = market.bestAsk;
+      orderTick = orderBook.bestShortTick;
     } else {
       // Buying short means taking the bid (long side of book)
-      orderApr = orderBook.bestLongTick ?? market.bestBid;
+      orderApr = market.bestBid;
+      orderTick = orderBook.bestLongTick;
     }
 
     // Check slippage vs target's entry APR
@@ -83,6 +94,7 @@ export class CopyExecutor {
       edgeBps: 0, // Copy trades don't have edge-based logic
       netEdgeBps: 0,
       targetApr: delta.targetEntryApr,
+      orderTick,
       orderApr,
       sizeBase,
       sizeBase18,
