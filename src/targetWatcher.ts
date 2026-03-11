@@ -14,13 +14,23 @@ interface ActivePositionResponse {
 export class TargetWatcher {
   private previousSnapshot: Map<number, TargetPositionSnapshot> = new Map();
   private resolvedAccountId: number;
+  private readonly deadzone: number;
 
   constructor(
     private readonly targetAddress: string,
     initialAccountId: number,
     private readonly api: BorosApiClient,
+    deadzone = 0.001,
   ) {
     this.resolvedAccountId = initialAccountId;
+    this.deadzone = deadzone;
+  }
+
+  hydrateFromSnapshot(positions: TargetPositionSnapshot[]): void {
+    this.previousSnapshot = new Map();
+    for (const pos of positions) {
+      this.previousSnapshot.set(pos.marketId, pos);
+    }
   }
 
   setAccountId(id: number): void {
@@ -89,7 +99,7 @@ export class TargetWatcher {
           targetNewSizeBase: pos.sizeBase,
           targetEntryApr: pos.entryApr,
         });
-      } else if (pos.sizeBase > prevPos.sizeBase * 1.001) {
+      } else if (pos.sizeBase > prevPos.sizeBase * (1 + this.deadzone)) {
         deltas.push({
           action: "INCREASE",
           marketId: pos.marketId,
@@ -98,7 +108,7 @@ export class TargetWatcher {
           targetNewSizeBase: pos.sizeBase,
           targetEntryApr: pos.entryApr,
         });
-      } else if (pos.sizeBase < prevPos.sizeBase * 0.999) {
+      } else if (pos.sizeBase < prevPos.sizeBase * (1 - this.deadzone)) {
         deltas.push({
           action: "DECREASE",
           marketId: pos.marketId,

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import type { CopyTradeRecord, ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TargetPositionSnapshot, TradeCandidate } from "./types.js";
+import type { CopyPosition, CopyTradeRecord, ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TargetPositionSnapshot, TradeCandidate } from "./types.js";
 
 function safeJsonStringify(value: unknown): string {
   return JSON.stringify(value, (_key, innerValue) =>
@@ -148,6 +148,21 @@ export class RuntimeStore {
         status TEXT NOT NULL,
         reason TEXT,
         raw_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS copy_positions (
+        id TEXT PRIMARY KEY,
+        market_id INTEGER NOT NULL,
+        side TEXT NOT NULL,
+        size_base REAL NOT NULL,
+        size_base18 TEXT NOT NULL,
+        entry_apr REAL NOT NULL,
+        notional_usd REAL NOT NULL,
+        margin_usd REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        opened_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        client_order_id TEXT
       );
     `);
 
@@ -571,6 +586,22 @@ export class RuntimeStore {
     this.setRuntimeValue("risk_state", state);
   }
 
+  public getLatestTargetSnapshot(targetAddress: string): TargetPositionSnapshot[] {
+    const row = this.db.prepare(`
+      SELECT positions_json FROM copy_target_snapshots
+      WHERE target_address = ?
+      ORDER BY recorded_at DESC
+      LIMIT 1
+    `).get(targetAddress) as { positions_json: string } | undefined;
+
+    if (!row) return [];
+    try {
+      return JSON.parse(row.positions_json) as TargetPositionSnapshot[];
+    } catch {
+      return [];
+    }
+  }
+
   public saveTargetSnapshot(targetAddress: string, positions: TargetPositionSnapshot[]): void {
     this.db.prepare(`
       INSERT INTO copy_target_snapshots (recorded_at, target_address, positions_json)
@@ -600,5 +631,62 @@ export class RuntimeStore {
       reason: record.reason ?? null,
       rawJson: JSON.stringify(record),
     });
+  }
+
+  public upsertCopyPosition(position: CopyPosition): void {
+    this.db.prepare(`
+      INSERT INTO copy_positions (
+        id, market_id, side, size_base, size_base18, entry_apr,
+        notional_usd, margin_usd, status, opened_at, closed_at, client_order_id
+      ) VALUES (
+        @id, @marketId, @side, @sizeBase, @sizeBase18, @entryApr,
+        @notionalUsd, @marginUsd, @status, @openedAt, @closedAt, @clientOrderId
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        size_base = excluded.size_base,
+        size_base18 = excluded.size_base18,
+        notional_usd = excluded.notional_usd,
+        margin_usd = excluded.margin_usd,
+        status = excluded.status,
+        closed_at = excluded.closed_at,
+        client_order_id = excluded.client_order_id
+    `).run({
+      id: position.id,
+      marketId: position.marketId,
+      side: position.side,
+      sizeBase: position.sizeBase,
+      sizeBase18: position.sizeBase18,
+      entryApr: position.entryApr,
+      notionalUsd: position.notionalUsd,
+      marginUsd: position.marginUsd,
+      status: position.status,
+      openedAt: position.openedAt,
+      closedAt: position.closedAt ?? null,
+      clientOrderId: position.clientOrderId ?? null,
+    });
+  }
+
+  public getOpenCopyPositions(): CopyPosition[] {
+    const rows = this.db.prepare(`SELECT * FROM copy_positions WHERE status = 'OPEN' ORDER BY opened_at ASC`).all() as Array<Record<string, unknown>>;
+    return rows.map((row): CopyPosition => ({
+      id: String(row.id),
+      marketId: Number(row.market_id),
+      side: String(row.side) as CopyPosition["side"],
+      sizeBase: Number(row.size_base),
+      sizeBase18: String(row.size_base18),
+      entryApr: Number(row.entry_apr),
+      notionalUsd: Number(row.notional_usd),
+      marginUsd: Number(row.margin_usd),
+      status: String(row.status) as CopyPosition["status"],
+      openedAt: Number(row.opened_at),
+      closedAt: row.closed_at === null ? undefined : Number(row.closed_at),
+      clientOrderId: row.client_order_id === null ? undefined : String(row.client_order_id),
+    }));
+  }
+
+  public closeCopyPosition(id: string): void {
+    this.db.prepare(`
+      UPDATE copy_positions SET status = 'CLOSED', closed_at = ? WHERE id = ?
+    `).run(Math.floor(Date.now() / 1000), id);
   }
 }

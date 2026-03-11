@@ -61,12 +61,12 @@ async function main(): Promise<void> {
   if (config.copyTrade.enabled) {
     const copyTrader = new CopyTrader(config, api, store);
 
-    process.on("SIGINT", () => {
-      copyTrader.stop();
+    process.on("SIGINT", async () => {
+      await copyTrader.stop();
       process.exit(0);
     });
-    process.on("SIGTERM", () => {
-      copyTrader.stop();
+    process.on("SIGTERM", async () => {
+      await copyTrader.stop();
       process.exit(0);
     });
 

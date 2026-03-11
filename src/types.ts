@@ -167,6 +167,14 @@ export interface RiskState {
   dailyPnlPct: number;
 }
 
+export interface CopyRiskState {
+  failureStreak: number;
+  dailyPnlUsd: number;
+  killSwitchActive: boolean;
+  killSwitchReason?: string;
+  currentPositionCount: number;
+}
+
 export interface MarketEvaluation {
   snapshot: MarketSnapshot;
   fairValue: FairValueEstimate;
@@ -221,6 +229,13 @@ export interface CopyTradeConfig {
   maxNotionalUsd: number;
   maxSlippage: number;
   discordWebhookUrl?: string;
+  minOrderNotionalUsd: number;
+  maxConcurrentPositions: number;
+  delayBetweenOrdersMs: number;
+  deltaDeadzone: number;
+  maxFailureStreak: number;
+  maxDailyDrawdownPct: number;
+  minLiquidityCoverage: number;
 }
 
 export interface TargetPositionSnapshot {
@@ -252,4 +267,19 @@ export interface CopyTradeRecord {
   status: "EXECUTED" | "SKIPPED" | "FAILED";
   reason?: string;
   timestamp: number;
+}
+
+export interface CopyPosition {
+  id: string;
+  marketId: number;
+  side: TradeSide;
+  sizeBase: number;
+  sizeBase18: string;
+  entryApr: number;
+  notionalUsd: number;
+  marginUsd: number;
+  status: "OPEN" | "CLOSED";
+  openedAt: number;
+  closedAt?: number;
+  clientOrderId?: string;
 }

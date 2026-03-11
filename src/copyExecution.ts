@@ -34,22 +34,35 @@ export class CopyExecutor {
       sizeBase = this.config.maxNotionalUsd / market.assetMarkPrice;
     }
 
+    // Liquidity check: fetch order book and cap size by available liquidity
+    const orderBook = await this.api.fetchOrderBook(market.marketId);
+    const availableLiquidity = delta.side === "LONG"
+      ? orderBook.bestShortSizeBase
+      : orderBook.bestLongSizeBase;
+
+    if (!availableLiquidity) {
+      throw new Error(`No order book liquidity for ${delta.side} side`);
+    }
+
+    const liquidityCap = availableLiquidity / this.config.minLiquidityCoverage;
+    if (sizeBase > liquidityCap) {
+      sizeBase = liquidityCap;
+    }
+
     const sizeBase18 = toBase18(sizeBase);
     const finalNotionalUsd = sizeBase * market.assetMarkPrice;
 
     // Skip orders below exchange minimum
-    const MIN_ORDER_USD = 10;
-    if (finalNotionalUsd < MIN_ORDER_USD) {
-      throw new Error(`Order notional $${finalNotionalUsd.toFixed(2)} below $${MIN_ORDER_USD} minimum`);
+    if (finalNotionalUsd < this.config.minOrderNotionalUsd) {
+      throw new Error(`Order notional $${finalNotionalUsd.toFixed(2)} below $${this.config.minOrderNotionalUsd} minimum`);
     }
 
     // Use taker for copy trades (we want immediate fills)
     const orderIntent = "taker" as const;
 
-    // Determine order APR and tick from order book
+    // Determine order APR and tick from order book (already fetched above for liquidity check)
     // orderApr = real APR from market (for slippage checks)
     // orderTick = raw tick index from order book (for limitTick on the order)
-    const orderBook = await this.api.fetchOrderBook(market.marketId);
     let orderApr: number;
     let orderTick: number | undefined;
     if (delta.side === "LONG") {

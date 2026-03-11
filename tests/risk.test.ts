@@ -50,6 +50,13 @@ const config: TraderConfig = {
     sizeRatio: 1.0,
     maxNotionalUsd: 5_000,
     maxSlippage: 0.10,
+    minOrderNotionalUsd: 10,
+    maxConcurrentPositions: 10,
+    delayBetweenOrdersMs: 500,
+    deltaDeadzone: 0.001,
+    maxFailureStreak: 5,
+    maxDailyDrawdownPct: 0.05,
+    minLiquidityCoverage: 3,
   },
 };
 

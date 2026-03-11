@@ -164,6 +164,13 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
       maxNotionalUsd: getOptionalNumber("BOROS_COPY_TRADE_MAX_NOTIONAL_USD", 5_000),
       maxSlippage: getOptionalNumber("BOROS_COPY_TRADE_MAX_SLIPPAGE", 0.10),
       discordWebhookUrl: process.env.BOROS_COPY_TRADE_DISCORD_WEBHOOK_URL || undefined,
+      minOrderNotionalUsd: getOptionalNumber("BOROS_COPY_TRADE_MIN_ORDER_NOTIONAL_USD", 10),
+      maxConcurrentPositions: getOptionalNumber("BOROS_COPY_TRADE_MAX_CONCURRENT_POSITIONS", 10),
+      delayBetweenOrdersMs: getOptionalNumber("BOROS_COPY_TRADE_DELAY_BETWEEN_ORDERS_MS", 500),
+      deltaDeadzone: getOptionalNumber("BOROS_COPY_TRADE_DELTA_DEADZONE", 0.001),
+      maxFailureStreak: getOptionalNumber("BOROS_COPY_TRADE_MAX_FAILURE_STREAK", 5),
+      maxDailyDrawdownPct: getOptionalNumber("BOROS_COPY_TRADE_MAX_DAILY_DRAWDOWN_PCT", 0.05),
+      minLiquidityCoverage: getOptionalNumber("BOROS_COPY_TRADE_MIN_LIQUIDITY_COVERAGE", 3),
     },
   };
 }
