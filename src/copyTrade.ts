@@ -259,7 +259,12 @@ export class CopyTrader {
         const msg = lastError.message;
 
         if (msg.includes("ORDER_VALUE_TOO_LOW") && attempt < maxRetries) {
-          // Double the size and retry
+          // Only double size on cross markets — isolated markets are margin-constrained
+          // and doubling would just fail harder
+          if (candidate.isIsolatedOnly) {
+            console.log(`[copy-trade] ORDER_VALUE_TOO_LOW on isolated market ${candidate.marketId}, not retrying with larger size`);
+            break;
+          }
           candidate = { ...candidate, sizeBase: candidate.sizeBase * 2, sizeBase18: candidate.sizeBase18 * 2n, notionalUsd: candidate.notionalUsd * 2 };
           console.log(`[copy-trade] retry ${attempt}/${maxRetries}: ORDER_VALUE_TOO_LOW, doubling size to ${candidate.sizeBase.toFixed(4)}`);
           continue;
