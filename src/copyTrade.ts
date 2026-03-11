@@ -16,6 +16,9 @@ export class CopyTrader {
   private timer?: ReturnType<typeof setInterval>;
   private marketCache: Map<number, MarketSummary> = new Map();
   private lastMarketFetch = 0;
+  private pollCount = 0;
+  private lastHeartbeat = 0;
+  private startedAt = Date.now();
 
   constructor(
     private readonly config: TraderConfig,
@@ -75,6 +78,17 @@ export class CopyTrader {
 
     const { positions, deltas } = await this.watcher.poll();
     this.store.saveTargetSnapshot(this.config.copyTrade.targetAddress, positions);
+    this.pollCount++;
+
+    // Heartbeat every 60 seconds
+    const now = Date.now();
+    if (now - this.lastHeartbeat >= 60_000) {
+      const uptime = Math.floor((now - this.startedAt) / 1000);
+      const mins = Math.floor(uptime / 60);
+      const secs = uptime % 60;
+      console.log(`[copy-trade] heartbeat | uptime=${mins}m${secs}s polls=${this.pollCount} positions=${positions.length} deltas=${deltas.length}`);
+      this.lastHeartbeat = now;
+    }
 
     if (deltas.length === 0) {
       return;
@@ -83,7 +97,6 @@ export class CopyTrader {
     console.log(`[copy-trade] detected ${deltas.length} position change(s)`);
 
     // Refresh market cache if stale (every 5 minutes)
-    const now = Date.now();
     if (now - this.lastMarketFetch > 300_000) {
       try {
         const markets = await this.api.fetchMarkets();
