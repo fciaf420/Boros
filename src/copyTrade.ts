@@ -151,6 +151,12 @@ export class CopyTrader {
       }
       const delta = deltas[i];
 
+      // Skip INCREASE/DECREASE if we never entered this market
+      if ((delta.action === "INCREASE" || delta.action === "DECREASE") && !this.store.getOpenCopyPositions().some(p => p.marketId === delta.marketId)) {
+        console.log(`[copy-trade] SKIP ${delta.action} market=${delta.marketId}: no existing copy position`);
+        continue;
+      }
+
       // Block ENTER/INCREASE deltas if at max concurrent positions
       if ((delta.action === "ENTER" || delta.action === "INCREASE") && this.store.getOpenCopyPositions().length >= this.config.copyTrade.maxConcurrentPositions) {
         const record: CopyTradeRecord = {
