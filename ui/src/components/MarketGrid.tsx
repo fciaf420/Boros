@@ -201,7 +201,7 @@ export default function MarketGrid({ markets, loading, lastUpdated, error, stale
                     <TooltipTrigger asChild>
                       <span><span className="text-text-muted font-normal">{m.marketId}</span> {m.imData?.symbol}</span>
                     </TooltipTrigger>
-                    <TooltipContent side="right" className="p-2 bg-panel border border-border">
+                    <TooltipContent side="right" className="p-3 bg-surface border border-border shadow-xl max-w-none">
                       <MarketDetail marketId={m.marketId} />
                     </TooltipContent>
                   </Tooltip>

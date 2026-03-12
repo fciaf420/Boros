@@ -54,8 +54,21 @@ app.get("/api/markets", async (_req, res) => {
 
 app.get("/api/orderbook/:id", async (req, res) => {
   try {
-    const data = await borosFetch(`/v1/order-books/${req.params.id}?tickSize=0.001`);
-    res.json(data);
+    const TICK_SIZE = 0.001; // APR per tick
+    const raw = (await borosFetch(`/v1/order-books/${req.params.id}?tickSize=${TICK_SIZE}`)) as {
+      long?: { ia: number[]; sz: string[] };
+      short?: { ia: number[]; sz: string[] };
+    };
+    const fromBase18 = (s: string) => Number(BigInt(s)) / 1e18;
+    const toEntries = (side: { ia: number[]; sz: string[] } | undefined) =>
+      (side?.ia ?? []).map((tick, i) => ({
+        apr: tick * TICK_SIZE,
+        notional: fromBase18(side!.sz[i]),
+      }));
+    // long side = bids (highest first), short side = asks (lowest first)
+    const bids = toEntries(raw.long).sort((a, b) => b.apr - a.apr);
+    const asks = toEntries(raw.short).sort((a, b) => a.apr - b.apr);
+    res.json({ bids, asks });
   } catch (err) {
     res.status(502).json({ error: String(err) });
   }
