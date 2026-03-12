@@ -60,6 +60,9 @@ export class CopyTrader {
       this.watcher.setAccountId(ids[0]);
     }
 
+    // Clear any stale kill switch state from a previous run
+    this.store.appendKillSwitchEvent("resolved", { source: "copy-trade", reason: "bot restarted" });
+
     // Recover previous snapshot from DB to prevent false ENTER deltas on restart
     const savedSnapshot = this.store.getLatestTargetSnapshot(this.config.copyTrade.targetAddress);
     if (savedSnapshot.length > 0) {
