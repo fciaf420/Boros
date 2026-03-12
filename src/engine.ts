@@ -5,7 +5,7 @@ import { LiveBroker, PaperBroker, type Broker } from "./execution.js";
 import { allocateSignalWeightedBudgets, chooseInitialSizeBase, computeRiskState, makePositionId, openPositionPnlPct, openPositionPnlUsd, orderBookLiquidity, perMarketMarginBudget, refreshOpenPosition, remainingMarginBudget, sizeAsBase18 } from "./risk.js";
 import { estimateFairValue } from "./strategy.js";
 import type { ActionType, CycleAction, CycleSummary, ExecutionRecord, MarketEvaluation, MarketSnapshot, OpenPosition, TradeCandidate, TradeSide } from "./types.js";
-import { decimalToBps, fromBase18 } from "./utils.js";
+import { decimalToBps, fromBase18, settlementAdjustedEdge } from "./utils.js";
 
 const MAKER_TIF = 3;
 const TAKER_TIF = 2;
@@ -201,7 +201,11 @@ export class RelativeValueTrader {
       });
     }
 
-    return evaluations.sort((left, right) => (right.candidate?.netEdgeBps ?? -Infinity) - (left.candidate?.netEdgeBps ?? -Infinity));
+    return evaluations.sort((left, right) => {
+      const leftAdj = settlementAdjustedEdge(left.candidate?.netEdgeBps ?? -Infinity, left.snapshot.market.paymentPeriodSeconds);
+      const rightAdj = settlementAdjustedEdge(right.candidate?.netEdgeBps ?? -Infinity, right.snapshot.market.paymentPeriodSeconds);
+      return rightAdj - leftAdj;
+    });
   }
 
   private async buildCandidate(
@@ -431,7 +435,7 @@ export class RelativeValueTrader {
           ...simulation,
           liquidationBufferBps,
         },
-        rationale: `${action} ${side} because fair APR ${fairValue.fairApr.toFixed(4)} vs mid ${snapshot.market.midApr.toFixed(4)} leaves ${netEdgeBps.toFixed(1)} bps net edge`,
+        rationale: `${action} ${side} because fair APR ${fairValue.fairApr.toFixed(4)} vs mid ${snapshot.market.midApr.toFixed(4)} leaves ${netEdgeBps.toFixed(1)} bps net edge (${(snapshot.market.paymentPeriodSeconds / 3600).toFixed(0)}h settlement)`,
       },
     };
   }
@@ -456,9 +460,12 @@ export class RelativeValueTrader {
           if (!evaluation.candidate || evaluation.candidate.action !== "ENTER") {
             return [];
           }
+          const rawScore = Math.max(evaluation.candidate.netEdgeBps, evaluation.candidate.edgeBps, this.config.minEdgeBps);
+          // Boost score by settlement frequency: 1h markets score 8× higher than 8h at equal edge
+          const adjustedScore = settlementAdjustedEdge(rawScore, evaluation.snapshot.market.paymentPeriodSeconds);
           return [{
             key: String(evaluation.snapshot.market.marketId),
-            score: Math.max(evaluation.candidate.netEdgeBps, evaluation.candidate.edgeBps, this.config.minEdgeBps),
+            score: adjustedScore,
           }];
         }),
       remainingMarginBudget(this.config, riskState),

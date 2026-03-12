@@ -42,6 +42,24 @@ export function yearsFromSeconds(seconds: number): number {
   return Math.max(0, seconds) / YEAR_SECONDS;
 }
 
+/** How many settlement periods fit in one day for a given payment period. */
+export function settlementsPerDay(paymentPeriodSeconds: number): number {
+  if (paymentPeriodSeconds <= 0) return 1;
+  return (24 * 3600) / paymentPeriodSeconds;
+}
+
+/**
+ * Scale a raw edge (bps) by the settlement frequency relative to a reference.
+ * Markets that settle more often realise carry faster, so the same APR edge
+ * is worth more.  We normalise to 8h (the most common Boros period) so that
+ * 8h markets keep their edge unchanged while 1h markets get a boost.
+ */
+const REFERENCE_PERIOD_SECONDS = 8 * 3600; // 8h baseline
+export function settlementAdjustedEdge(edgeBps: number, paymentPeriodSeconds: number): number {
+  if (paymentPeriodSeconds <= 0) return edgeBps;
+  return edgeBps * (REFERENCE_PERIOD_SECONDS / paymentPeriodSeconds);
+}
+
 export function signedCarryPnlUsd(
   side: "LONG" | "SHORT",
   floatingApr: number,

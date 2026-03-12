@@ -199,7 +199,12 @@ export default function MarketGrid({ markets, loading, lastUpdated, error, stale
                 <TableCell className="text-coral font-semibold">
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <span><span className="text-text-muted font-normal">{m.marketId}</span> {m.imData?.symbol}</span>
+                      <span>
+                        <span className="text-text-muted font-normal">{m.marketId}</span> {m.imData?.symbol}
+                        <span className={`ml-1 text-[9px] font-normal ${(m.extConfig?.paymentPeriod ?? 0) <= 3600 ? "text-green" : "text-text-muted/60"}`}>
+                          {m.extConfig?.paymentPeriod ? `${(m.extConfig.paymentPeriod / 3600).toFixed(0)}h` : ""}
+                        </span>
+                      </span>
                     </TooltipTrigger>
                     <TooltipContent side="right" className="p-3 bg-surface border border-border shadow-xl max-w-none">
                       <MarketDetail marketId={m.marketId} />
