@@ -31,15 +31,21 @@ Built on the official `@pendle/sdk-boros` and Boros REST API.
 
 ```bash
 npm install
+cd ui && npm install && cd ..
 cp .env.example .env    # configure your credentials
 ```
 
 ```bash
-npm run start            # continuous polling
-npm run start:once       # single cycle, then exit
-npm run typecheck        # type check
-npm test                 # run test suite
+npm run boros              # interactive wizard (choose mode, configure, launch)
+npm run boros -- --resume  # skip wizard, launch with existing .env config
+npm run boros -- --ui      # dashboard only, no trading
+npm run start              # bot only (no dashboard)
+npm run start:once         # single cycle, then exit
+npm run typecheck          # type check
+npm test                   # run test suite
 ```
+
+> **Note:** The `--` before flags like `--resume` is required so npm passes them to the script instead of consuming them.
 
 ---
 
@@ -223,7 +229,7 @@ Remove `BOROS_DRY_RUN` and restart. The bot will execute real orders for any new
 | $500 | $475 | 0.50 | $100 |
 | $5,000 | $475 | 1.0 | $500 |
 
-Keep in mind Boros has a ~$10 minimum order size. Positions that scale below this will be skipped.
+Keep in mind Boros has a ~$10 minimum order size. With `BOROS_COPY_TRADE_ROUND_UP_TO_MIN=true` (default), sub-minimum orders are automatically rounded up to the $10 floor. Set to `false` to skip them instead.
 
 ---
 
@@ -277,9 +283,24 @@ Keep in mind Boros has a ~$10 minimum order size. Positions that scale below thi
 | `BOROS_COPY_TRADE_MAX_NOTIONAL_USD` | `5000` | Cap per copied position |
 | `BOROS_COPY_TRADE_POLLING_MS` | `10000` | Poll interval in ms |
 | `BOROS_COPY_TRADE_MAX_SLIPPAGE` | `0.10` | Max APR slippage |
+| `BOROS_COPY_TRADE_ROUND_UP_TO_MIN` | `true` | Round up sub-minimum orders to $10 floor |
 | `BOROS_COPY_TRADE_DISCORD_WEBHOOK_URL` | — | Separate webhook for copy alerts |
 
 See `.env.example` for the complete list.
+
+---
+
+## Dashboard
+
+Real-time monitoring UI built with React + Tailwind + shadcn/ui. Launches alongside the bot via the wizard or `--resume`.
+
+- **Strategy tab** — market grid with edge scanner, positions, risk panel
+- **Copy tab** — target tracker, copy positions, copy trades, on-chain positions
+- **Activity log** — draggable panel (drag the divider to resize) showing bot events
+- **Settings drawer** — edit `.env` config live from the UI (critical changes require confirmation)
+- **Keyboard shortcuts** — `1` Strategy, `2` Copy, `s` Settings, `Esc` close
+
+Runs at `http://localhost:5173` (UI) and `http://localhost:3142` (API).
 
 ---
 
@@ -287,6 +308,7 @@ See `.env.example` for the complete list.
 
 ```
 src/
+  cli.ts                CLI wizard & process manager (--resume, --ui)
   index.ts              entry point — routes to RV trader or copy trader
   engine.ts             RelativeValueTrader — main strategy loop
   strategy.ts           fair value estimation (median of clipped APR sources)
