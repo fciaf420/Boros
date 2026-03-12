@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "ui": "cd ui && npm run dev",
     "ui:build": "cd ui && npm run build",
-    "ui:install": "cd ui && npm install"
+    "ui:install": "cd ui && npm install",
+    "boros": "tsx src/cli.ts"
   },
   "dependencies": {
     "@pendle/sdk-boros": "^1.1.40",

@@ -1,437 +1,601 @@
 """
-Automated Trading Strategies for Boros Funding Rate Arbitrage
-============================================================
+DEPRECATED — This file is legacy Python code from the early prototype.
+The active system is the TypeScript bot in src/ (run via `npm run boros`).
+This file is kept for reference only and will be removed in a future cleanup.
 
-Implements specific trading strategies based on successful examples from:
-- @ViNc2453's 15% spread arbitrage (6,900% theoretical APY)
-- @Rightsideonly's triple profit play (7.08% APY with <0.1 ETH risk)
-- @phtevenstrong's capital efficient hedging (1000x margin efficiency)
+──────────────────────────────────────────────────────────────────────────
 
-Key Strategies:
-1. Fixed vs Floating Rate Swaps
-2. Delta Neutral Carry Trades  
-3. Mean Reversion on Extreme Rates
-4. Capital Efficient Hedging
+Boros Trading Strategies - Aligned with Protocol Mechanics
+==========================================================
+
+Implements trading strategies based on actual Boros protocol mechanics:
+- Yield Units (YU) trading with proper settlement modeling
+- Two profit sources: Settlement gains + Implied APR movement
+- Time-to-maturity decay
+- Proper margin and leverage calculations
+
+Reference: https://pendle.gitbook.io/boros
 """
 
 import asyncio
 import json
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 import logging
 from enum import Enum
+import math
+
+# =============================================================================
+# ENUMS AND CONSTANTS
+# =============================================================================
 
 class StrategyType(Enum):
     SIMPLE_DIRECTIONAL = "simple_directional"
-    FIXED_FLOATING_SWAP = "fixed_floating_swap"
-    TRIPLE_PROFIT = "triple_profit"
-    MEAN_REVERSION = "mean_reversion"  
-    DELTA_NEUTRAL_HEDGE = "delta_neutral_hedge"
-    CAPITAL_EFFICIENT_HEDGE = "capital_efficient_hedge"
     IMPLIED_APR_BANDS = "implied_apr_bands"
+    SETTLEMENT_CARRY = "settlement_carry"  # New: pure settlement profit strategy
 
 class RiskLevel(Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
-@dataclass
-class Position:
-    strategy: StrategyType
-    symbol: str
-    position_type: str  # "long" or "short"
-    size: float
-    entry_implied_apr: float
-    entry_timestamp: datetime
-    collateral_used: float
-    leverage: float
-    health_factor: float
-    expected_apy: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+class PositionSide(Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    NONE = "NONE"
+
+# Settlement intervals by exchange (in hours)
+SETTLEMENT_INTERVALS = {
+    "Binance": 8,
+    "Hyperliquid": 1,
+    "Default": 8
+}
+
+# =============================================================================
+# DATA CLASSES - Aligned with Boros Terminology
+# =============================================================================
 
 @dataclass
-class MarketCondition:
-    symbol: str
-    cex_funding_rate: float
-    boros_implied_apr: float
-    spread: float
-    volatility: float
-    liquidity: float
-    time_to_next_funding: timedelta
+class BorosMarket:
+    """
+    Market data structure aligned with Boros terminology.
+
+    Boros Terms:
+    - Implied APR: The "price" of YU, market's expected average funding rate until maturity
+    - Underlying APR: Current actual funding rate from the exchange
+    - Spread: Difference between underlying and implied (our calculation)
+    """
+    symbol: str                    # Unique market ID (e.g., "BTCUSDT_BINANCE_SEP_2025")
+    base_asset: str               # Base asset (e.g., "BTCUSDT")
+    exchange: str                 # Exchange name (e.g., "Binance", "Hyperliquid")
+    maturity: str                 # Maturity date string (e.g., "26 Sept 2025")
+    maturity_date: Optional[datetime] = None  # Parsed maturity date
+
+    # Core Boros metrics (as decimals, e.g., 0.07 = 7%)
+    implied_apr: float = 0.0      # Boros Implied APR - the "price" of YU
+    underlying_apr: float = 0.0   # Boros Underlying APR - actual funding rate
+
+    # Derived metrics
+    spread: float = 0.0           # underlying_apr - implied_apr
+    spread_bps: float = 0.0       # Spread in basis points
+
+    # Market depth (from raw data if available)
+    open_interest: float = 0.0    # Open interest in base asset units
+    volume_24h: float = 0.0       # 24h volume in base asset units
+
+    # Settlement info
+    settlement_interval_hours: int = 8  # Hours between settlements
+
+    def __post_init__(self):
+        """Calculate derived fields"""
+        self.spread = self.underlying_apr - self.implied_apr
+        self.spread_bps = self.spread * 10000
+        self.settlement_interval_hours = SETTLEMENT_INTERVALS.get(
+            self.exchange, SETTLEMENT_INTERVALS["Default"]
+        )
+
+    @property
+    def days_to_maturity(self) -> Optional[float]:
+        """Calculate days until maturity"""
+        if self.maturity_date:
+            delta = self.maturity_date - datetime.now()
+            return max(0, delta.total_seconds() / 86400)
+        return None
+
+    @property
+    def years_to_maturity(self) -> Optional[float]:
+        """Calculate years until maturity (for APR calculations)"""
+        days = self.days_to_maturity
+        if days is not None:
+            return days / 365
+        return None
+
+    @property
+    def settlements_remaining(self) -> Optional[int]:
+        """Estimate number of settlements until maturity"""
+        days = self.days_to_maturity
+        if days is not None:
+            hours_remaining = days * 24
+            return int(hours_remaining / self.settlement_interval_hours)
+        return None
+
+
+@dataclass
+class YUPosition:
+    """
+    Represents a Yield Unit position on Boros.
+
+    Per Boros docs:
+    - Long YU: Pay fixed (implied at entry), Receive underlying
+    - Short YU: Pay underlying, Receive fixed (implied at entry)
+    """
+    strategy: StrategyType
+    market: BorosMarket
+    side: PositionSide
+    size_yu: float                # Number of YU (notional exposure in base asset)
+    entry_implied_apr: float      # Implied APR at entry (becomes your fixed rate)
+    entry_timestamp: datetime
+
+    # Margin and leverage
+    collateral: float = 0.0       # Collateral backing position
+    leverage: float = 1.0         # Position leverage
+    initial_margin: float = 0.0   # Margin consumed by position
+
+    # P&L tracking
+    realized_settlement_pnl: float = 0.0   # Accumulated from settlements
+    unrealized_apr_pnl: float = 0.0        # From implied APR movement
+
+    # Risk metrics
+    health_factor: float = 1.5
+    liquidation_implied_apr: Optional[float] = None
+
+    @property
+    def fixed_apr(self) -> float:
+        """Your fixed rate - the implied APR at entry"""
+        return self.entry_implied_apr
+
+    @property
+    def notional_value(self) -> float:
+        """Position notional value in base asset terms"""
+        return self.size_yu
+
+    def calculate_settlement_pnl(self, current_underlying_apr: float,
+                                   settlement_interval_hours: int) -> float:
+        """
+        Calculate P&L from a single settlement.
+
+        Per Boros docs:
+        - Long: Receive (underlying - fixed) scaled to settlement period
+        - Short: Receive (fixed - underlying) scaled to settlement period
+        """
+        # Scale APR to settlement period (APR is annual, settlement is every X hours)
+        period_fraction = settlement_interval_hours / (365 * 24)
+
+        if self.side == PositionSide.LONG:
+            # Long: pay fixed, receive underlying
+            rate_diff = current_underlying_apr - self.fixed_apr
+        elif self.side == PositionSide.SHORT:
+            # Short: pay underlying, receive fixed
+            rate_diff = self.fixed_apr - current_underlying_apr
+        else:
+            return 0.0
+
+        # Settlement P&L = notional * rate_diff * period_fraction
+        return self.size_yu * rate_diff * period_fraction
+
+    def calculate_position_value(self, current_implied_apr: float,
+                                   years_to_maturity: float) -> float:
+        """
+        Calculate current position value based on implied APR.
+
+        Per Boros docs:
+        - YU value = (APR difference from entry) * years_to_maturity * notional
+        - Value decays linearly as maturity approaches
+        """
+        if years_to_maturity <= 0:
+            return 0.0
+
+        if self.side == PositionSide.LONG:
+            # Long benefits when implied APR rises
+            apr_change = current_implied_apr - self.entry_implied_apr
+        elif self.side == PositionSide.SHORT:
+            # Short benefits when implied APR falls
+            apr_change = self.entry_implied_apr - current_implied_apr
+        else:
+            return 0.0
+
+        return self.size_yu * apr_change * years_to_maturity
+
+
+@dataclass
+class TradingOpportunity:
+    """Standardized opportunity output for all strategies"""
+    strategy_type: str
+    action: str                   # ENTER_LONG, ENTER_SHORT, EXIT_LONG, EXIT_SHORT
+    position_type: str            # "long" or "short"
+    market: BorosMarket
+
+    # Core metrics
+    current_spread: float         # underlying - implied
+    implied_apr: float
+    underlying_apr: float
+
+    # Expected returns (separated by source)
+    expected_settlement_apy: float = 0.0   # From settlement gains
+    expected_capital_apy: float = 0.0      # From implied APR movement
+    expected_total_apy: float = 0.0        # Combined
+
+    # Risk metrics
+    risk_score: float = 0.5       # 0-1 scale
+    max_position_size: float = 0.0
+    recommended_leverage: float = 1.0
+
+    # Position management
+    position_key: str = ""        # For state tracking
+    new_position_state: str = ""  # LONG, SHORT, or NONE
+    is_reversal: bool = False
+    previous_position: str = ""
+
+    # Rationale
+    rationale: str = ""
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for compatibility with existing alert system"""
+        return {
+            "strategy_type": self.strategy_type,
+            "action": self.action,
+            "position_type": self.position_type,
+            "current_spread": self.current_spread,
+            "abs_spread": abs(self.current_spread),
+            "implied_apr": self.implied_apr,
+            "underlying_apr": self.underlying_apr,
+            "expected_settlement_apy": self.expected_settlement_apy,
+            "expected_capital_apy": self.expected_capital_apy,
+            "expected_apy": self.expected_total_apy,
+            "risk_score": self.risk_score,
+            "max_position_size": self.max_position_size,
+            "recommended_leverage": self.recommended_leverage,
+            "position_key": self.position_key,
+            "new_position_state": self.new_position_state,
+            "is_reversal": self.is_reversal,
+            "previous_position": self.previous_position,
+            "rationale": self.rationale,
+            # Legacy compatibility fields
+            "current_implied_apr": self.implied_apr,
+            "target_implied_apr": self.implied_apr,  # Will be set by specific strategies
+        }
+
+
+# =============================================================================
+# MARGIN CALCULATIONS - Per Boros Docs
+# =============================================================================
+
+def calculate_initial_margin(notional_size: float, years_to_maturity: float,
+                              implied_apr: float, leverage: float) -> float:
+    """
+    Calculate initial margin required per Boros formula.
+
+    Formula: InitialMargin = (NotionalSize * YearsToMaturity * ImpliedAPR) / Leverage
+    """
+    if leverage <= 0:
+        leverage = 1.0
+    return (notional_size * years_to_maturity * implied_apr) / leverage
+
+
+def calculate_maintenance_margin(initial_margin: float) -> float:
+    """
+    Maintenance margin is 50% of initial margin per Boros docs.
+    """
+    return initial_margin * 0.5
+
+
+def calculate_health_factor(net_balance: float, maintenance_margin: float) -> float:
+    """
+    Health factor = Net Balance / Maintenance Margin
+    Liquidation occurs when health factor falls to 0.
+    """
+    if maintenance_margin <= 0:
+        return float('inf')
+    return net_balance / maintenance_margin
+
+
+def calculate_liquidation_implied_apr(position: YUPosition, market: BorosMarket) -> Optional[float]:
+    """
+    Calculate the implied APR at which position gets liquidated.
+
+    This is when Net Balance = Maintenance Margin.
+    """
+    if not market.years_to_maturity or market.years_to_maturity <= 0:
+        return None
+
+    maintenance_margin = calculate_maintenance_margin(position.initial_margin)
+
+    # Simplified calculation - actual would need current collateral state
+    # Liquidation APR depends on position direction
+    if position.side == PositionSide.LONG:
+        # Long gets liquidated when implied APR drops significantly
+        # Rough estimate: entry APR - (collateral - maintenance) / (notional * years)
+        buffer = (position.collateral - maintenance_margin) / (position.size_yu * market.years_to_maturity)
+        return max(0, position.entry_implied_apr - buffer)
+    elif position.side == PositionSide.SHORT:
+        # Short gets liquidated when implied APR rises significantly
+        buffer = (position.collateral - maintenance_margin) / (position.size_yu * market.years_to_maturity)
+        return position.entry_implied_apr + buffer
+
+    return None
+
+
+# =============================================================================
+# STRATEGY: Simple Directional YU Trading
+# =============================================================================
 
 class SimpleDirectionalStrategy:
     """
-    Simple directional YU trading based on Boros implied vs underlying spread.
-    
-    Logic:
-    - LONG YU when underlying > implied by ≥0.5% (expecting YU price to rise)
-    - SHORT YU when implied > underlying by ≥0.5% (expecting YU price to fall)
-    - Exit when spread approaches zero (≤0.2%)
-    - State tracking prevents entry/exit confusion
-    
-    Pure on-chain strategy - no external CEX positions required.
+    Directional YU trading based on spread between implied and underlying APR.
+
+    Per Boros mechanics:
+    - LONG YU when underlying > implied: You pay lower fixed rate, receive higher floating
+    - SHORT YU when implied > underlying: You receive higher fixed rate, pay lower floating
+
+    Profit sources:
+    1. Settlement gains: Each settlement, collect (underlying - fixed) for longs
+    2. Capital gains: If implied APR moves in your favor, position value increases
     """
-    
+
     def __init__(self):
         self.name = "Simple Directional YU Trading"
         self.risk_level = RiskLevel.LOW
-        # Exchange-specific thresholds due to settlement frequency differences
+
+        # Exchange-specific thresholds (tighter for faster settlement)
         self.thresholds = {
             "Hyperliquid": {
-                "min_spread": 0.007,    # 0.7% - tighter due to hourly settlements
-                "exit_threshold": 0.001  # 0.1% - faster exits
+                "entry_spread": 0.007,    # 0.7% - tighter due to hourly settlements
+                "exit_spread": 0.001,     # 0.1% - faster exits
+                "reversal_spread": 0.005  # 0.5% - reversal threshold
             },
             "Binance": {
-                "min_spread": 0.005,    # 0.5% - standard threshold
-                "exit_threshold": 0.002  # 0.2% - standard exit
+                "entry_spread": 0.005,    # 0.5% - standard threshold
+                "exit_spread": 0.002,     # 0.2% - standard exit
+                "reversal_spread": 0.004  # 0.4% - reversal threshold
             }
         }
         self.positions_file = "positions_state.json"
-        
+
     def load_positions(self) -> dict:
-        """Load current positions from state file"""
         try:
             with open(self.positions_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
-    
+
     def save_positions(self, positions: dict):
-        """Save current positions to state file"""
         with open(self.positions_file, 'w') as f:
             json.dump(positions, f, indent=2)
-    
+
     def get_thresholds(self, exchange: str) -> dict:
-        """Get exchange-specific thresholds"""
         return self.thresholds.get(exchange, self.thresholds["Binance"])
-    
-    def check_exit_conditions(self, market: MarketCondition, current_position: str, exchange: str = "Binance") -> Optional[Dict]:
-        """Check if current position should be exited"""
-        thresholds = self.get_thresholds(exchange)
-        spread = market.cex_funding_rate - market.boros_implied_apr
-        abs_spread = abs(spread)
-        
-        # Exit condition 1: Spread narrowing (approaching crossover)
-        if abs_spread <= thresholds["exit_threshold"]:
-            action = f"EXIT_{current_position}"
-            rationale = f"Spread narrowing to {abs_spread:.2%} - approaching crossover"
-        
-        # Exit condition 2: Position moving strongly against us
-        elif ((current_position == "LONG" and spread <= -thresholds["min_spread"]) or 
-              (current_position == "SHORT" and spread >= thresholds["min_spread"])):
-            action = f"EXIT_{current_position}"
-            if current_position == "LONG":
-                rationale = f"Strong contrary signal: Implied > Underlying by {abs_spread:.2%} - exit LONG"
-            else:
-                rationale = f"Strong contrary signal: Underlying > Implied by {abs_spread:.2%} - exit SHORT"
-        
+
+    def calculate_expected_returns(self, market: BorosMarket, side: PositionSide) -> Tuple[float, float, float]:
+        """
+        Calculate expected returns from both profit sources.
+
+        Returns: (settlement_apy, capital_apy, total_apy)
+        """
+        spread = market.spread  # underlying - implied
+
+        # Settlement APY: If spread persists, you earn this per year
+        if side == PositionSide.LONG:
+            # Long earns when underlying > implied
+            settlement_apy = max(0, spread)
+        elif side == PositionSide.SHORT:
+            # Short earns when implied > underlying
+            settlement_apy = max(0, -spread)
         else:
-            return None
-            
-        return {
-            "strategy_type": "simple_directional",
-            "action": action,
-            "position_type": current_position.lower(),
-            "current_spread": spread,
-            "abs_spread": abs_spread,
-            "rationale": rationale,
-            "expected_apy": 0.0,  # Exit, no expected return
-            "risk_score": 0.1,
-            "max_position_size": 0  # Closing position
-        }
-    
-    def check_entry_conditions(self, market: MarketCondition, exchange: str = "Binance") -> Optional[Dict]:
-        """Check if new position should be entered (ignores current position)"""
-        thresholds = self.get_thresholds(exchange)
-        spread = market.cex_funding_rate - market.boros_implied_apr
+            settlement_apy = 0.0
+
+        # Capital APY: Estimate based on mean reversion assumption
+        # Assume spread will revert by 50% over holding period
+        mean_reversion_factor = 0.5
+
+        if side == PositionSide.LONG:
+            # Long profits if implied APR rises (spread narrows from positive)
+            capital_apy = abs(spread) * mean_reversion_factor if spread > 0 else 0
+        elif side == PositionSide.SHORT:
+            # Short profits if implied APR falls (spread narrows from negative)
+            capital_apy = abs(spread) * mean_reversion_factor if spread < 0 else 0
+        else:
+            capital_apy = 0.0
+
+        total_apy = settlement_apy + capital_apy
+
+        return settlement_apy, capital_apy, total_apy
+
+    def check_exit_conditions(self, market: BorosMarket, current_position: str) -> Optional[TradingOpportunity]:
+        """Check if current position should be exited"""
+        thresholds = self.get_thresholds(market.exchange)
+        spread = market.spread
         abs_spread = abs(spread)
-        
-        if abs_spread >= thresholds["min_spread"]:
-            if spread > 0:  # underlying > implied
-                action = "ENTER_LONG"
-                new_position = "LONG"
-                rationale = f"Underlying ({market.cex_funding_rate:.2%}) > Implied ({market.boros_implied_apr:.2%})"
-            else:  # implied > underlying
-                action = "ENTER_SHORT" 
-                new_position = "SHORT"
-                rationale = f"Implied ({market.boros_implied_apr:.2%}) > Underlying ({market.cex_funding_rate:.2%})"
-            
-            return {
-                "strategy_type": "simple_directional",
-                "action": action,
-                "position_type": new_position.lower(),
-                "current_spread": spread,
-                "abs_spread": abs_spread,
-                "rationale": rationale,
-                "expected_apy": abs_spread * 1.0,  # No leverage
-                "risk_score": 0.3,  # Low risk
-                "max_position_size": 50000,  # Conservative
-                "new_position": new_position  # Helper for state management
-            }
-        return None
-    
-    def evaluate_opportunity(self, market: MarketCondition, exchange: str = "Binance") -> Optional[Dict]:
+
+        should_exit = False
+        rationale = ""
+
+        # Exit condition 1: Spread narrowing (approaching crossover)
+        if abs_spread <= thresholds["exit_spread"]:
+            should_exit = True
+            rationale = f"Spread narrowed to {abs_spread:.2%} - approaching zero, take profits"
+
+        # Exit condition 2: Strong contrary signal (spread reversed)
+        elif current_position == "LONG" and spread <= -thresholds["reversal_spread"]:
+            should_exit = True
+            rationale = f"Spread reversed to {spread:.2%} (implied > underlying) - exit LONG"
+        elif current_position == "SHORT" and spread >= thresholds["reversal_spread"]:
+            should_exit = True
+            rationale = f"Spread reversed to {spread:.2%} (underlying > implied) - exit SHORT"
+
+        if not should_exit:
+            return None
+
+        return TradingOpportunity(
+            strategy_type="simple_directional",
+            action=f"EXIT_{current_position}",
+            position_type=current_position.lower(),
+            market=market,
+            current_spread=spread,
+            implied_apr=market.implied_apr,
+            underlying_apr=market.underlying_apr,
+            expected_settlement_apy=0.0,
+            expected_capital_apy=0.0,
+            expected_total_apy=0.0,
+            risk_score=0.1,
+            max_position_size=0,
+            rationale=rationale
+        )
+
+    def check_entry_conditions(self, market: BorosMarket) -> Optional[TradingOpportunity]:
+        """Check if new position should be entered"""
+        thresholds = self.get_thresholds(market.exchange)
+        spread = market.spread
+        abs_spread = abs(spread)
+
+        if abs_spread < thresholds["entry_spread"]:
+            return None
+
+        # Determine direction based on spread
+        if spread > 0:
+            # Underlying > Implied: LONG YU
+            # You pay lower implied (fixed), receive higher underlying
+            side = PositionSide.LONG
+            action = "ENTER_LONG"
+            rationale = f"Underlying ({market.underlying_apr:.2%}) > Implied ({market.implied_apr:.2%}) by {spread:.2%}"
+        else:
+            # Implied > Underlying: SHORT YU
+            # You receive higher implied (fixed), pay lower underlying
+            side = PositionSide.SHORT
+            action = "ENTER_SHORT"
+            rationale = f"Implied ({market.implied_apr:.2%}) > Underlying ({market.underlying_apr:.2%}) by {abs_spread:.2%}"
+
+        # Calculate expected returns
+        settlement_apy, capital_apy, total_apy = self.calculate_expected_returns(market, side)
+
+        # Risk assessment based on spread magnitude and time to maturity
+        risk_score = 0.3  # Base risk for directional trades
+        if market.days_to_maturity and market.days_to_maturity < 30:
+            risk_score += 0.2  # Higher risk near maturity (less time for convergence)
+
+        # Position sizing (conservative)
+        max_position = min(market.open_interest * 0.05, 50000) if market.open_interest > 0 else 50000
+
+        opp = TradingOpportunity(
+            strategy_type="simple_directional",
+            action=action,
+            position_type=side.value.lower(),
+            market=market,
+            current_spread=spread,
+            implied_apr=market.implied_apr,
+            underlying_apr=market.underlying_apr,
+            expected_settlement_apy=settlement_apy,
+            expected_capital_apy=capital_apy,
+            expected_total_apy=total_apy,
+            risk_score=risk_score,
+            max_position_size=max_position,
+            recommended_leverage=1.0,
+            rationale=rationale
+        )
+        opp.new_position_state = side.value
+
+        return opp
+
+    def evaluate_opportunity(self, market: BorosMarket) -> Optional[Dict]:
         """Two-phase evaluation: exit then entry with position reversal detection"""
-        
+
         positions = self.load_positions()
         key = f"SIMPLE_DIRECTIONAL:{market.symbol}"
         current_position = positions.get(key, "NONE")
-        
+
         # Phase 1: Check exit conditions if we have a position
         exit_signal = None
         if current_position != "NONE":
-            exit_signal = self.check_exit_conditions(market, current_position, exchange)
-        
-        # Phase 2: Check entry conditions (always check regardless of current position)
-        entry_signal = self.check_entry_conditions(market, exchange)
-        
-        # Phase 3: Determine what to return (NO position updates here - global ranking handles that)
+            exit_signal = self.check_exit_conditions(market, current_position)
+
+        # Phase 2: Check entry conditions
+        entry_signal = self.check_entry_conditions(market)
+
+        # Phase 3: Determine what to return
         if exit_signal and entry_signal:
-            # Position reversal: Exit current and enter opposite
-            new_position = entry_signal["new_position"]
-            
-            # Add position update info for global ranking to handle
-            entry_signal["position_key"] = key
-            entry_signal["new_position_state"] = new_position
-            entry_signal["is_reversal"] = True
-            entry_signal["previous_position"] = current_position
-            entry_signal["rationale"] = f"REVERSAL: Exit {current_position} → Enter {new_position}. {entry_signal['rationale']}"
-            del entry_signal["new_position"]  # Clean up helper field
-            return entry_signal
-            
+            # Position reversal
+            entry_signal.position_key = key
+            entry_signal.is_reversal = True
+            entry_signal.previous_position = current_position
+            entry_signal.rationale = f"REVERSAL: Exit {current_position} -> Enter {entry_signal.new_position_state}. {entry_signal.rationale}"
+            return entry_signal.to_dict()
+
         elif exit_signal:
-            # Exit only - add position update info for global ranking
-            exit_signal["position_key"] = key
-            exit_signal["new_position_state"] = "NONE"
-            return exit_signal
-            
+            exit_signal.position_key = key
+            exit_signal.new_position_state = "NONE"
+            return exit_signal.to_dict()
+
         elif entry_signal and current_position == "NONE":
-            # New entry only (no current position) - add position update info
-            new_position = entry_signal["new_position"]
-            entry_signal["position_key"] = key
-            entry_signal["new_position_state"] = new_position
-            del entry_signal["new_position"]  # Clean up helper field
-            return entry_signal
-        
-        # No action needed
+            entry_signal.position_key = key
+            return entry_signal.to_dict()
+
         return None
 
-class FixedFloatingSwapStrategy:
-    """
-    Based on @ViNc2453's example:
-    - Binance ETH funding at 8.5% APY (cost to short)
-    - Boros implied +6.33% APY (cost to long YU)
-    - 2.17% spread = profitable arbitrage opportunity
-    
-    Strategy: Exploit spreads between CEX funding rates and Boros implied rates
-    """
-    
-    def __init__(self):
-        self.name = "Fixed vs Floating Rate Swap"
-        self.risk_level = RiskLevel.MEDIUM
-        
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        """Evaluate if conditions are favorable for fixed/floating swap"""
-        
-        # Look for meaningful spreads between CEX funding and Boros implied APR
-        min_spread = 0.02  # 2% minimum spread (based on corrected analysis)
-        
-        if abs(market.spread) < min_spread:
-            return None
-            
-        # Determine position based on spread direction
-        if market.cex_funding_rate < market.boros_implied_apr:
-            # Underlying rate is lower than Boros implied rate
-            # Strategy: Short YU (receive implied APR), Long underlying (pay underlying rate)
-            strategy_type = "short_yu_long_underlying"
-            expected_profit = market.boros_implied_apr - market.cex_funding_rate  # Always positive
-        else:
-            # Underlying rate is higher than Boros implied rate  
-            # Strategy: Long YU (pay implied APR), Short underlying (receive underlying rate)
-            strategy_type = "long_yu_short_underlying"
-            expected_profit = market.cex_funding_rate - market.boros_implied_apr  # Always positive
-            
-        # Calculate theoretical APY with leverage
-        max_leverage = 1.2  # Boros current limit
-        theoretical_apy = expected_profit * max_leverage
-        
-        # Risk assessment
-        risk_score = self._assess_risk(market)
-        
-        return {
-            "strategy_type": strategy_type,
-            "expected_profit": expected_profit,
-            "theoretical_apy": theoretical_apy,
-            "expected_apy": theoretical_apy,  # Add this for alert system compatibility
-            "risk_score": min(risk_score, 1.0),  # Cap at 1.0 for display
-            "max_position_size": min(market.liquidity * 0.1, 1000000),  # 10% of liquidity or $1M
-            "recommended_leverage": min(max_leverage, 1.0 + (expected_profit / 0.1))  # Scale leverage with spread
-        }
-        
-    def _assess_risk(self, market: MarketCondition) -> float:
-        """Assess risk score from 0-1"""
-        risk_factors = [
-            min(market.volatility / 0.5, 1.0),  # Higher volatility = higher risk
-            max(0, (0.05 - market.liquidity/1000000) / 0.05),  # Lower liquidity = higher risk  
-            max(0, (timedelta(hours=2) - market.time_to_next_funding).seconds / 7200)  # Close to funding = higher risk
-        ]
-        return sum(risk_factors) / len(risk_factors)
 
-class TripleProfitStrategy:
-    """
-    Based on @Rightsideonly's example:
-    - Short YU-ETH at 6.69% implied APR (collect fixed payments)
-    - Receive +8.15% from negative CEX funding rates  
-    - Benefit from capital appreciation when implied APR drops
-    - Result: 7.08% APY with <0.1 ETH risk
-    """
-    
-    def __init__(self):
-        self.name = "Triple Profit Play"
-        self.risk_level = RiskLevel.HIGH
-        
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        """Evaluate triple profit opportunity"""
-        
-        # Conditions for triple profit:
-        # 1. High Boros implied APR (>6%) to short and collect fixed payments
-        # 2. Negative CEX funding rate to receive funding payments
-        # 3. Expectation that implied APR will decrease (capital gains)
-        
-        min_boros_rate = 0.06  # 6% minimum
-        max_cex_rate = -0.001  # Negative funding required
-        
-        if market.boros_implied_apr < min_boros_rate:
-            return None
-            
-        if market.cex_funding_rate > max_cex_rate:
-            return None
-            
-        # Calculate three profit streams
-        fixed_income = market.boros_implied_apr  # From shorting YU
-        funding_income = abs(market.cex_funding_rate)  # From negative CEX rates
-        
-        # Estimate capital appreciation potential
-        # Assume implied APR might drop 20-30% from current levels
-        implied_apr_drop = market.boros_implied_apr * 0.25  # 25% drop
-        capital_gain_rate = implied_apr_drop  # Simplified calculation
-        
-        total_expected_return = fixed_income + funding_income + capital_gain_rate
-        
-        # Risk-adjusted return (triple profit has execution risk)
-        risk_adjustment = 0.7  # 30% haircut for execution risk
-        expected_apy = total_expected_return * risk_adjustment
-        
-        # Position sizing (conservative due to complexity)
-        max_position = min(market.liquidity * 0.05, 500000)  # 5% of liquidity or $500K
-        
-        return {
-            "strategy_type": "triple_profit",
-            "fixed_income": fixed_income,
-            "funding_income": funding_income, 
-            "capital_gain_potential": capital_gain_rate,
-            "total_return": total_expected_return,
-            "expected_apy": expected_apy,
-            "max_position_size": max_position,
-            "recommended_leverage": 1.1,  # Conservative leverage
-            "risk_score": 0.8  # High risk due to complexity
-        }
-
-class MeanReversionStrategy:
-    """
-    Trade extreme funding rates expecting reversion to mean
-    - Short funding rates >40% APY (expect decline)
-    - Long funding rates <-15% APY (expect recovery)
-    """
-    
-    def __init__(self):
-        self.name = "Mean Reversion Trading"
-        self.risk_level = RiskLevel.HIGH
-        self.mean_funding_rate = 0.10  # Assume 10% APY long-term mean
-        
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        """Evaluate mean reversion opportunity"""
-        
-        # Convert CEX funding to annualized rate
-        annual_funding = market.cex_funding_rate
-        
-        # Define extreme thresholds
-        extreme_high = 0.40  # 40% APY
-        extreme_low = -0.15  # -15% APY
-        
-        if annual_funding > extreme_high:
-            # Rate is extremely high - expect reversion down
-            strategy_type = "short_extreme_high"
-            expected_reversion = annual_funding - self.mean_funding_rate
-            position_type = "short"
-            
-        elif annual_funding < extreme_low:
-            # Rate is extremely low - expect reversion up  
-            strategy_type = "long_extreme_low"
-            expected_reversion = self.mean_funding_rate - annual_funding
-            position_type = "long"
-            
-        else:
-            return None  # Not extreme enough
-            
-        # Time decay factor - mean reversion typically happens over days/weeks
-        time_factor = 0.5  # Assume 50% of move happens in our holding period
-        
-        expected_profit = expected_reversion * time_factor
-        theoretical_apy = expected_profit * 1.2  # With leverage
-        
-        return {
-            "strategy_type": strategy_type,
-            "position_type": position_type,
-            "current_rate": annual_funding,
-            "target_rate": self.mean_funding_rate,
-            "expected_reversion": expected_reversion,
-            "expected_profit": expected_profit,
-            "theoretical_apy": theoretical_apy,
-            "max_position_size": 750000,  # $750K limit for volatile strategy
-            "recommended_leverage": 1.2,
-            "risk_score": 0.9,  # Very high risk
-            "stop_loss": 0.15,  # 15% stop loss
-            "take_profit": 0.30  # 30% take profit
-        }
+# =============================================================================
+# STRATEGY: Implied APR Band Trading
+# =============================================================================
 
 class ImpliedAPRBandStrategy:
     """
-    Implements a simple implied-APR band mean reversion based on @DDangleDan's playbook:
-    - Long YU when implied APR is near/under 6%, exit around 6.8–7%
-    - Short YU when implied APR is above ~8%, exit around 6–6.8%
+    Trade implied APR mean reversion within defined bands.
 
-    Notes:
-    - Works off Boros implied APR only (independent from CEX funding), aligning with YU mark APR view.
-    - Provides conservative sizing and optional DCA guidance when entries move against you.
+    Based on the concept that implied APR tends to oscillate around a mean:
+    - LONG YU when implied APR is low (cheap): Bet on APR rising
+    - SHORT YU when implied APR is high (expensive): Bet on APR falling
+
+    This is primarily a CAPITAL APPRECIATION strategy.
+    Settlement gains/losses are secondary since we're betting on APR movement.
+
+    Key insight from Boros docs:
+    - Implied APR is the "price" of YU
+    - When implied APR rises, long positions profit
+    - When implied APR falls, short positions profit
     """
 
     def __init__(self):
-        self.name = "Implied APR Bands"
+        self.name = "Implied APR Band Trading"
         self.risk_level = RiskLevel.MEDIUM
-        # Track APR band positions in the shared state file
         self.positions_file = "positions_state.json"
-        # Default symbol band config; values are annualized APR levels (e.g., 0.06 = 6%)
+
+        # Band configurations by symbol (values are APR as decimals)
         self.bands_by_symbol = {
             "ETHUSDT": {
-                "long_entry": 0.0600,
-                "long_exit": 0.0685,   # mid of 6.5-7.0% window
-                "short_entry": 0.0800,
-                "short_exit": 0.0680,
-                "dca_step": 0.0025,    # add every +25 bps adverse move
+                "long_entry": 0.0500,    # Buy YU when implied APR <= 5%
+                "long_exit": 0.0700,     # Sell when implied APR reaches 7%
+                "short_entry": 0.0900,   # Short YU when implied APR >= 9%
+                "short_exit": 0.0700,    # Cover when implied APR reaches 7%
+                "dca_step": 0.0050,      # Add position every 50bps adverse move
+                "max_adds": 3
+            },
+            "BTCUSDT": {
+                "long_entry": 0.0550,
+                "long_exit": 0.0750,
+                "short_entry": 0.0950,
+                "short_exit": 0.0750,
+                "dca_step": 0.0050,
                 "max_adds": 3
             }
         }
-        # Fallback bands for symbols not explicitly configured
+
+        # Default bands for unconfigured symbols
         self.default_bands = {
             "long_entry": 0.0600,
-            "long_exit": 0.0680,
-            "short_entry": 0.0800,
-            "short_exit": 0.0680,
-            "dca_step": 0.0025,
+            "long_exit": 0.0750,
+            "short_entry": 0.0900,
+            "short_exit": 0.0750,
+            "dca_step": 0.0050,
             "max_adds": 2
         }
 
@@ -446,455 +610,545 @@ class ImpliedAPRBandStrategy:
         with open(self.positions_file, 'w') as f:
             json.dump(positions, f, indent=2)
 
-    def get_bands(self, symbol: str) -> dict:
-        return self.bands_by_symbol.get(symbol, self.default_bands)
+    def get_bands(self, base_asset: str) -> dict:
+        """Get band configuration for asset"""
+        return self.bands_by_symbol.get(base_asset, self.default_bands)
 
-    def check_exit_conditions_bands(self, market: MarketCondition, current_position: str, bands: dict) -> Optional[Dict]:
-        """Check if current APR bands position should be exited"""
-        apr = market.boros_implied_apr
-        
+    def calculate_expected_capital_return(self, current_apr: float, target_apr: float,
+                                            years_to_maturity: Optional[float]) -> float:
+        """
+        Calculate expected return from implied APR movement.
+
+        Per Boros docs, position value = notional * APR_change * years_to_maturity
+        For APY calculation, we annualize this.
+        """
+        apr_move = abs(target_apr - current_apr)
+
+        # Sensitivity factor: how much position value changes per APR point
+        # This depends on time to maturity
+        if years_to_maturity and years_to_maturity > 0:
+            # Longer maturity = more sensitivity to APR changes
+            sensitivity = min(years_to_maturity * 2, 4.0)  # Cap at 4x
+        else:
+            sensitivity = 2.0  # Default assumption
+
+        return apr_move * sensitivity
+
+    def check_exit_conditions(self, market: BorosMarket, current_position: str,
+                               bands: dict) -> Optional[TradingOpportunity]:
+        """Check if current APR band position should be exited"""
+        apr = market.implied_apr
+
+        should_exit = False
+        target_apr = 0.0
+
         if current_position == "LONG" and apr >= bands["long_exit"]:
-            return {
-                "strategy_type": "implied_apr_bands_long",
-                "action": "EXIT_LONG",
-                "position_type": "long",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["long_exit"],
-                "expected_move": 0.0,
-                "expected_apy": 0.0,
-                "risk_score": 0.2,
-                "max_position_size": 0,
-                "recommended_leverage": 1.0
-            }
+            should_exit = True
+            target_apr = bands["long_exit"]
         elif current_position == "SHORT" and apr <= bands["short_exit"]:
-            return {
-                "strategy_type": "implied_apr_bands_short",
-                "action": "EXIT_SHORT",
-                "position_type": "short",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["short_exit"],
-                "expected_move": 0.0,
-                "expected_apy": 0.0,
-                "risk_score": 0.2,
-                "max_position_size": 0,
-                "recommended_leverage": 1.0
-            }
-        return None
-    
-    def check_entry_conditions_bands(self, market: MarketCondition, bands: dict) -> Optional[Dict]:
-        """Check if new APR bands position should be entered (ignores current position)"""
-        apr = market.boros_implied_apr
-        
-        # Long setup: buy low APR, target mid band
+            should_exit = True
+            target_apr = bands["short_exit"]
+
+        if not should_exit:
+            return None
+
+        opp = TradingOpportunity(
+            strategy_type="implied_apr_bands",
+            action=f"EXIT_{current_position}",
+            position_type=current_position.lower(),
+            market=market,
+            current_spread=market.spread,
+            implied_apr=apr,
+            underlying_apr=market.underlying_apr,
+            expected_settlement_apy=0.0,
+            expected_capital_apy=0.0,
+            expected_total_apy=0.0,
+            risk_score=0.2,
+            max_position_size=0,
+            rationale=f"Target APR {target_apr:.2%} reached - take profits"
+        )
+        # Add target APR for display
+        opp_dict = opp.to_dict()
+        opp_dict["target_implied_apr"] = target_apr
+        opp_dict["current_implied_apr"] = apr
+        return opp_dict
+
+    def check_entry_conditions(self, market: BorosMarket, bands: dict) -> Optional[TradingOpportunity]:
+        """Check if new APR band position should be entered"""
+        apr = market.implied_apr
+
+        side = None
+        target_apr = 0.0
+        rationale = ""
+
         if apr <= bands["long_entry"]:
-            move = max(0.0, bands["long_exit"] - apr)
-            sensitivity = 4.0
-            expected_apy = move * sensitivity
-            
-            return {
-                "strategy_type": "implied_apr_bands_long",
-                "action": "ENTER_LONG",
-                "position_type": "long",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["long_exit"],
-                "expected_move": move,
-                "expected_apy": expected_apy,
-                "risk_score": 0.5,
-                "max_position_size": min(market.liquidity * 0.03, 250000),
-                "recommended_leverage": 1.0,
-                "dca_step": bands["dca_step"],
-                "max_adds": bands["max_adds"],
-                "stop_loss": None,
-                "take_profit": None,
-                "new_position": "LONG"  # Helper for state management
-            }
-        
-        # Short setup: sell high APR, target back to mid band
+            side = PositionSide.LONG
+            target_apr = bands["long_exit"]
+            rationale = f"Implied APR ({apr:.2%}) is LOW - buy YU expecting rise to {target_apr:.2%}"
         elif apr >= bands["short_entry"]:
-            move = max(0.0, apr - bands["short_exit"])
-            sensitivity = 4.0
-            expected_apy = move * sensitivity
-            
-            return {
-                "strategy_type": "implied_apr_bands_short",
-                "action": "ENTER_SHORT",
-                "position_type": "short",
-                "current_implied_apr": apr,
-                "target_implied_apr": bands["short_exit"],
-                "expected_move": move,
-                "expected_apy": expected_apy,
-                "risk_score": 0.6,
-                "max_position_size": min(market.liquidity * 0.03, 250000),
-                "recommended_leverage": 1.0,
-                "dca_step": bands["dca_step"],
-                "max_adds": bands["max_adds"],
-                "stop_loss": None,
-                "take_profit": None,
-                "new_position": "SHORT"  # Helper for state management
-            }
-        
-        return None
-    
-    def evaluate_opportunity(self, market: MarketCondition) -> Optional[Dict]:
-        """Two-phase evaluation: exit then entry with position reversal detection"""
-        bands = self.get_bands(market.symbol)
-        
-        # Load current APR-band position state
+            side = PositionSide.SHORT
+            target_apr = bands["short_exit"]
+            rationale = f"Implied APR ({apr:.2%}) is HIGH - short YU expecting fall to {target_apr:.2%}"
+        else:
+            return None
+
+        # Calculate expected capital return
+        capital_apy = self.calculate_expected_capital_return(apr, target_apr, market.years_to_maturity)
+
+        # Settlement APY is secondary but include it
+        # For band trading, we're not primarily betting on settlement direction
+        settlement_apy = 0.0  # Neutral assumption
+
+        total_apy = capital_apy + settlement_apy
+
+        # Risk assessment
+        risk_score = 0.5  # Base risk for mean reversion trades
+
+        # Higher risk if far from target
+        apr_distance = abs(apr - target_apr)
+        if apr_distance > 0.03:  # More than 3% to go
+            risk_score += 0.1
+
+        # Position sizing
+        max_position = min(market.open_interest * 0.03, 250000) if market.open_interest > 0 else 250000
+
+        opp = TradingOpportunity(
+            strategy_type="implied_apr_bands",
+            action=f"ENTER_{side.value}",
+            position_type=side.value.lower(),
+            market=market,
+            current_spread=market.spread,
+            implied_apr=apr,
+            underlying_apr=market.underlying_apr,
+            expected_settlement_apy=settlement_apy,
+            expected_capital_apy=capital_apy,
+            expected_total_apy=total_apy,
+            risk_score=risk_score,
+            max_position_size=max_position,
+            recommended_leverage=1.0,
+            rationale=rationale
+        )
+        opp.new_position_state = side.value
+
+        # Convert to dict and add band-specific fields
+        opp_dict = opp.to_dict()
+        opp_dict["target_implied_apr"] = target_apr
+        opp_dict["current_implied_apr"] = apr
+        opp_dict["expected_move"] = abs(target_apr - apr)
+        opp_dict["dca_step"] = bands["dca_step"]
+        opp_dict["max_adds"] = bands["max_adds"]
+        opp_dict["new_position"] = side.value  # For compatibility
+
+        return opp_dict
+
+    def evaluate_opportunity(self, market: BorosMarket) -> Optional[Dict]:
+        """Two-phase evaluation with position reversal detection"""
+        bands = self.get_bands(market.base_asset)
+
         positions = self.load_positions()
         key = f"APR_BANDS:{market.symbol}"
         current_position = positions.get(key, "NONE")
-        
-        # Phase 1: Check exit conditions if we have a position
+
+        # Phase 1: Check exit conditions
         exit_signal = None
         if current_position != "NONE":
-            exit_signal = self.check_exit_conditions_bands(market, current_position, bands)
-        
-        # Phase 2: Check entry conditions (always check regardless of current position)
-        entry_signal = self.check_entry_conditions_bands(market, bands)
-        
-        # Phase 3: Determine what to return (NO position updates here - global ranking handles that)
+            exit_signal = self.check_exit_conditions(market, current_position, bands)
+
+        # Phase 2: Check entry conditions
+        entry_signal = self.check_entry_conditions(market, bands)
+
+        # Phase 3: Determine what to return
         if exit_signal and entry_signal:
-            # Position reversal: Exit current and enter opposite
-            new_position = entry_signal["new_position"]
-            
-            # Add position update info for global ranking to handle
+            # Position reversal
             entry_signal["position_key"] = key
-            entry_signal["new_position_state"] = new_position
             entry_signal["is_reversal"] = True
             entry_signal["previous_position"] = current_position
-            
-            # Update rationale to show reversal
-            apr = market.boros_implied_apr
-            entry_signal["rationale"] = f"REVERSAL: Exit {current_position} → Enter {new_position} at {apr:.2%} APR"
-            del entry_signal["new_position"]  # Clean up helper field
+            new_pos = entry_signal.get("new_position_state", entry_signal.get("new_position", ""))
+            entry_signal["rationale"] = f"REVERSAL: Exit {current_position} -> Enter {new_pos} at {market.implied_apr:.2%} APR"
+            if "new_position" in entry_signal:
+                del entry_signal["new_position"]
             return entry_signal
-            
+
         elif exit_signal:
-            # Exit only - add position update info for global ranking
             exit_signal["position_key"] = key
             exit_signal["new_position_state"] = "NONE"
             return exit_signal
-            
+
         elif entry_signal and current_position == "NONE":
-            # New entry only (no current position) - add position update info
-            new_position = entry_signal["new_position"]
             entry_signal["position_key"] = key
-            entry_signal["new_position_state"] = new_position
-            del entry_signal["new_position"]  # Clean up helper field
+            if "new_position" in entry_signal:
+                del entry_signal["new_position"]
             return entry_signal
-        
-        # No action needed
+
         return None
 
-class DeltaNeutralHedgeStrategy:
+
+# =============================================================================
+# STRATEGY: Settlement Carry (Pure Yield)
+# =============================================================================
+
+class SettlementCarryStrategy:
     """
-    Based on @phtevenstrong's example:
-    - Hedge $70K ETH position with just 0.1 ETH margin
-    - 1000x capital efficiency vs traditional hedging
-    - Protect against funding rate volatility while maintaining delta neutrality
+    Pure settlement profit strategy - hold position to collect settlement payments.
+
+    Unlike directional strategies that bet on spread convergence, this strategy
+    focuses purely on collecting settlement payments over time.
+
+    Best for:
+    - Large, persistent spreads
+    - Longer time horizons
+    - Lower risk tolerance (settlements are more predictable)
+
+    Per Boros docs:
+    - Each settlement, collateral is adjusted by (underlying - fixed) for longs
+    - Over time, settlements accumulate into realized P&L
     """
-    
+
     def __init__(self):
-        self.name = "Capital Efficient Delta Neutral Hedge"
+        self.name = "Settlement Carry"
         self.risk_level = RiskLevel.LOW
-        
-    def evaluate_opportunity(self, existing_position: Dict, market: MarketCondition) -> Optional[Dict]:
-        """Evaluate hedging opportunity for existing position"""
-        
-        # Check if we have an existing position that needs hedging
-        position_value = existing_position.get("value", 0)
-        position_type = existing_position.get("type", "")  # "long" or "short"
-        
-        if position_value < 10000:  # Only hedge positions >$10K
+        self.positions_file = "positions_state.json"
+
+        # Minimum spread to justify entering (accounts for fees)
+        self.min_spread_threshold = 0.02  # 2% minimum spread
+
+        # Minimum time to maturity (days) - need enough settlements
+        self.min_days_to_maturity = 30
+
+    def load_positions(self) -> dict:
+        try:
+            with open(self.positions_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def calculate_expected_settlement_return(self, market: BorosMarket,
+                                               side: PositionSide) -> float:
+        """
+        Calculate expected settlement return if held to maturity.
+
+        Assumes spread persists (conservative estimate).
+        """
+        spread = market.spread
+
+        if side == PositionSide.LONG:
+            # Long earns positive spread
+            return max(0, spread)
+        elif side == PositionSide.SHORT:
+            # Short earns negative spread (when implied > underlying)
+            return max(0, -spread)
+
+        return 0.0
+
+    def evaluate_opportunity(self, market: BorosMarket) -> Optional[Dict]:
+        """Evaluate settlement carry opportunity"""
+
+        # Check minimum time to maturity
+        if market.days_to_maturity and market.days_to_maturity < self.min_days_to_maturity:
             return None
-            
-        # Calculate required hedge size
-        hedge_size = position_value  # 1:1 hedge ratio
-        
-        # Calculate margin efficiency 
-        # Example: Hedge $70K with 0.1 ETH (~$300) = 233x efficiency
-        required_margin = hedge_size / 200  # Assume 200x efficiency (conservative)
-        
-        # Determine hedge strategy based on existing position
-        if position_type == "long":
-            # Long position: hedge with short YU or short perp
-            hedge_strategy = "short_yu_hedge"
-            hedge_action = "short"
+
+        spread = market.spread
+        abs_spread = abs(spread)
+
+        # Check minimum spread threshold
+        if abs_spread < self.min_spread_threshold:
+            return None
+
+        # Determine direction
+        if spread > 0:
+            # Underlying > Implied: Long collects positive settlement
+            side = PositionSide.LONG
+            action = "ENTER_LONG"
+            rationale = f"Carry trade: Collect {spread:.2%} settlement yield (underlying > implied)"
         else:
-            # Short position: hedge with long YU or long perp  
-            hedge_strategy = "long_yu_hedge"
-            hedge_action = "long"
-            
-        # Calculate hedging cost/benefit
-        funding_cost = market.cex_funding_rate  # Cost of maintaining perp hedge
-        boros_cost = market.boros_implied_apr   # Cost of YU hedge
-        
-        # Choose cheaper hedge
-        if abs(funding_cost) < abs(boros_cost):
-            recommended_hedge = "perp_hedge"
-            hedge_cost = funding_cost
-        else:
-            recommended_hedge = "yu_hedge" 
-            hedge_cost = boros_cost
-            
-        capital_efficiency = position_value / required_margin
-        
-        return {
-            "strategy_type": "delta_neutral_hedge",
-            "existing_position_value": position_value,
-            "hedge_size": hedge_size,
-            "required_margin": required_margin,
-            "capital_efficiency": capital_efficiency,
-            "recommended_hedge": recommended_hedge,
-            "hedge_action": hedge_action,
-            "hedge_cost": hedge_cost,
-            "risk_score": 0.2,  # Low risk - this is defensive
-            "expected_apy": -abs(hedge_cost)  # Cost, not profit
-        }
+            # Implied > Underlying: Short collects positive settlement
+            side = PositionSide.SHORT
+            action = "ENTER_SHORT"
+            rationale = f"Carry trade: Collect {abs_spread:.2%} settlement yield (implied > underlying)"
+
+        settlement_apy = self.calculate_expected_settlement_return(market, side)
+
+        # Lower risk for carry trades (more predictable)
+        risk_score = 0.2
+
+        # Conservative position sizing
+        max_position = min(market.open_interest * 0.02, 100000) if market.open_interest > 0 else 100000
+
+        positions = self.load_positions()
+        key = f"SETTLEMENT_CARRY:{market.symbol}"
+        current_position = positions.get(key, "NONE")
+
+        # Only enter if no existing position
+        if current_position != "NONE":
+            return None
+
+        opp = TradingOpportunity(
+            strategy_type="settlement_carry",
+            action=action,
+            position_type=side.value.lower(),
+            market=market,
+            current_spread=spread,
+            implied_apr=market.implied_apr,
+            underlying_apr=market.underlying_apr,
+            expected_settlement_apy=settlement_apy,
+            expected_capital_apy=0.0,  # Not betting on APR movement
+            expected_total_apy=settlement_apy,
+            risk_score=risk_score,
+            max_position_size=max_position,
+            recommended_leverage=1.0,
+            rationale=rationale,
+            position_key=key,
+            new_position_state=side.value
+        )
+
+        return opp.to_dict()
+
+
+# =============================================================================
+# STRATEGY MANAGER
+# =============================================================================
 
 class StrategyManager:
-    """Manages multiple trading strategies and position execution"""
-    
+    """Manages multiple trading strategies with proper Boros mechanics"""
+
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
+
         self.strategies = {
             StrategyType.SIMPLE_DIRECTIONAL: SimpleDirectionalStrategy(),
-            StrategyType.IMPLIED_APR_BANDS: ImpliedAPRBandStrategy()
-            # Removed strategies requiring external CEX positions:
-            # StrategyType.FIXED_FLOATING_SWAP: FixedFloatingSwapStrategy(),
-            # StrategyType.TRIPLE_PROFIT: TripleProfitStrategy(),
-            # StrategyType.MEAN_REVERSION: MeanReversionStrategy(),
-            # StrategyType.DELTA_NEUTRAL_HEDGE: DeltaNeutralHedgeStrategy(),
+            StrategyType.IMPLIED_APR_BANDS: ImpliedAPRBandStrategy(),
+            StrategyType.SETTLEMENT_CARRY: SettlementCarryStrategy(),
         }
 
-        # Apply config overrides for implied APR bands if provided
+        # Apply config overrides for APR bands if provided
+        self._apply_band_config()
+
+        self.max_total_exposure = 5000000
+        self.max_positions_per_strategy = 3
+
+    def _apply_band_config(self):
+        """Apply configuration overrides for APR band strategy"""
         try:
             bands_cfg = self.config.get("implied_apr_bands")
-            if bands_cfg:
-                bands_strategy: ImpliedAPRBandStrategy = self.strategies[StrategyType.IMPLIED_APR_BANDS]  # type: ignore
-                # Expect shape: { "ETHUSDT": {"long_entry": 0.06, ... }, ... }
-                if isinstance(bands_cfg, dict):
-                    for symbol, band in bands_cfg.items():
-                        if not isinstance(band, dict):
-                            continue
-                        # Merge defaults with overrides
+            if bands_cfg and isinstance(bands_cfg, dict):
+                bands_strategy = self.strategies[StrategyType.IMPLIED_APR_BANDS]
+                for symbol, band in bands_cfg.items():
+                    if isinstance(band, dict):
                         merged = {**bands_strategy.default_bands, **band}
                         bands_strategy.bands_by_symbol[symbol] = merged
         except Exception:
-            # Fail-safe: ignore malformed config and keep defaults
-            pass
-        
-        self.active_positions: List[Position] = []
-        self.max_total_exposure = 5000000  # $5M total exposure limit
-        self.max_positions_per_strategy = 3
-        
-    async def evaluate_all_strategies(self, market: MarketCondition, exchange: str = "Binance") -> List[Dict]:
-        """Evaluate all strategies for given market conditions"""
-        
+            pass  # Keep defaults on error
+
+    async def evaluate_all_strategies(self, market: BorosMarket) -> List[Dict]:
+        """Evaluate all strategies for given market"""
         opportunities = []
-        
-        # Simple Directional Strategy (exchange-aware)
-        directional_opp = self.strategies[StrategyType.SIMPLE_DIRECTIONAL].evaluate_opportunity(market, exchange)
+
+        # Simple Directional
+        directional_opp = self.strategies[StrategyType.SIMPLE_DIRECTIONAL].evaluate_opportunity(market)
         if directional_opp:
             directional_opp["strategy"] = StrategyType.SIMPLE_DIRECTIONAL
             opportunities.append(directional_opp)
 
-        # Implied APR Bands (Dan's rules)
+        # Implied APR Bands
         bands_opp = self.strategies[StrategyType.IMPLIED_APR_BANDS].evaluate_opportunity(market)
         if bands_opp:
             bands_opp["strategy"] = StrategyType.IMPLIED_APR_BANDS
             opportunities.append(bands_opp)
-            
+
+        # Settlement Carry (optional - enable via config)
+        if self.config.get("enable_settlement_carry", False):
+            carry_opp = self.strategies[StrategyType.SETTLEMENT_CARRY].evaluate_opportunity(market)
+            if carry_opp:
+                carry_opp["strategy"] = StrategyType.SETTLEMENT_CARRY
+                opportunities.append(carry_opp)
+
         return opportunities
-    
+
     def should_execute_strategy(self, opportunity: Dict) -> bool:
-        """Determine if strategy should be executed based on risk management rules"""
-        
-        strategy_type = opportunity["strategy"]
-        
-        # Check position limits
-        current_positions = [p for p in self.active_positions if p.strategy == strategy_type]
-        if len(current_positions) >= self.max_positions_per_strategy:
-            return False
-            
-        # Check total exposure
-        total_exposure = sum(p.size * p.leverage for p in self.active_positions)
-        new_exposure = opportunity["max_position_size"] * opportunity.get("recommended_leverage", 1.0)
-        
-        if total_exposure + new_exposure > self.max_total_exposure:
-            return False
-            
-        # Risk-based thresholds
-        min_expected_returns = {
-            StrategyType.SIMPLE_DIRECTIONAL: 0.005,    # 0.5% minimum spread
-            StrategyType.IMPLIED_APR_BANDS: 0.01       # 1% proxy threshold for band moves
-        }
-        
-        min_return = min_expected_returns.get(strategy_type, 0.10)
-        
-        if opportunity.get("expected_apy", 0) < min_return:
-            return False
-            
-        # Risk score check
-        max_risk_scores = {
-            StrategyType.SIMPLE_DIRECTIONAL: 0.5,      # Low risk
-            StrategyType.IMPLIED_APR_BANDS: 0.7
-        }
-        
-        max_risk = max_risk_scores.get(strategy_type, 0.6)
-        
-        if opportunity.get("risk_score", 1.0) > max_risk:
-            return False
-            
-        return True
-    
-    async def execute_strategy(self, opportunity: Dict, market: MarketCondition) -> Optional[Position]:
-        """Execute the trading strategy"""
-        
-        strategy_type = opportunity["strategy"]
-        
-        # Calculate position size based on opportunity and risk
-        base_position_size = opportunity["max_position_size"]
-        risk_adjustment = 1.0 - opportunity.get("risk_score", 0.5)
-        
-        position_size = base_position_size * risk_adjustment * 0.5  # Conservative sizing
-        
-        # Create position object
-        position = Position(
-            strategy=strategy_type,
-            symbol=market.symbol,
-            position_type=opportunity.get("position_type", "long"),
-            size=position_size,
-            entry_implied_apr=market.boros_implied_apr,
-            entry_timestamp=datetime.now(),
-            collateral_used=position_size / opportunity.get("recommended_leverage", 1.0),
-            leverage=opportunity.get("recommended_leverage", 1.0),
-            health_factor=1.5,  # Start with healthy position
-            expected_apy=opportunity.get("expected_apy", 0),
-            stop_loss=opportunity.get("stop_loss"),
-            take_profit=opportunity.get("take_profit")
-        )
-        
-        # Log the execution
-        print(f"\n🚀 EXECUTING STRATEGY: {strategy_type.value}")
-        print(f"Symbol: {market.symbol}")
-        print(f"Position Size: ${position_size:,.0f}")
-        print(f"Expected APY: {opportunity.get('expected_apy', 0):.2%}")
-        print(f"Risk Score: {opportunity.get('risk_score', 0):.2f}")
-        
-        # Add to active positions
-        self.active_positions.append(position)
-        
-        # TODO: Implement actual trade execution
-        # This would involve:
-        # 1. Connect to Boros smart contracts
-        # 2. Execute YU long/short positions  
-        # 3. Execute corresponding CEX trades if needed
-        # 4. Monitor position health and funding settlements
-        
-        return position
-    
-    def monitor_positions(self):
-        """Monitor all active positions for risk management"""
-        
-        current_time = datetime.now()
-        
-        for position in self.active_positions[:]:  # Use slice to allow removal during iteration
-            
-            # Check position age
-            position_age = current_time - position.entry_timestamp
-            
-            # Example risk management rules
-            if position.health_factor < 1.1:  # Close to liquidation
-                print(f"⚠️  LOW HEALTH FACTOR: {position.symbol} - {position.health_factor:.2f}")
-                # TODO: Add collateral or close position
-                
-            elif position_age > timedelta(days=7):  # Position too old
-                print(f"🕐 OLD POSITION: {position.symbol} - {position_age.days} days")
-                # TODO: Consider closing position
-                
-            # Check stop loss / take profit
-            # This would require current market prices
-            # TODO: Implement P&L calculation and exit logic
-    
-    def get_portfolio_summary(self) -> Dict:
-        """Get summary of current portfolio"""
-        
-        if not self.active_positions:
-            return {"total_positions": 0, "total_exposure": 0, "total_collateral": 0}
-            
-        total_exposure = sum(p.size * p.leverage for p in self.active_positions)
-        total_collateral = sum(p.collateral_used for p in self.active_positions)
-        weighted_apy = sum(p.expected_apy * p.size for p in self.active_positions) / sum(p.size for p in self.active_positions)
-        
-        strategies_used = {}
-        for position in self.active_positions:
-            strategy = position.strategy.value
-            if strategy not in strategies_used:
-                strategies_used[strategy] = 0
-            strategies_used[strategy] += position.size
-            
-        return {
-            "total_positions": len(self.active_positions),
-            "total_exposure": total_exposure,
-            "total_collateral": total_collateral,
-            "weighted_expected_apy": weighted_apy,
-            "strategies_breakdown": strategies_used,
-            "utilization": total_exposure / self.max_total_exposure
+        """Determine if strategy should be executed based on risk management"""
+
+        strategy_type = opportunity.get("strategy")
+
+        # Minimum return thresholds by strategy
+        min_returns = {
+            StrategyType.SIMPLE_DIRECTIONAL: 0.005,
+            StrategyType.IMPLIED_APR_BANDS: 0.01,
+            StrategyType.SETTLEMENT_CARRY: 0.02,
         }
 
-# Example usage
+        min_return = min_returns.get(strategy_type, 0.01)
+        if opportunity.get("expected_apy", 0) < min_return:
+            return False
+
+        # Max risk thresholds
+        max_risks = {
+            StrategyType.SIMPLE_DIRECTIONAL: 0.5,
+            StrategyType.IMPLIED_APR_BANDS: 0.7,
+            StrategyType.SETTLEMENT_CARRY: 0.4,
+        }
+
+        max_risk = max_risks.get(strategy_type, 0.6)
+        if opportunity.get("risk_score", 1.0) > max_risk:
+            return False
+
+        return True
+
+
+# =============================================================================
+# HELPER: Convert rates.json to BorosMarket
+# =============================================================================
+
+def create_boros_market(market_data: Dict) -> BorosMarket:
+    """
+    Convert rates.json market data to BorosMarket object.
+
+    rates.json format:
+    {
+        "market": "BTCUSDT",
+        "implied": 7.51,        # Percentage
+        "underlying": 6.58,     # Percentage
+        "spread": -0.93,        # implied - underlying (we need to reverse)
+        "exchange": "Binance",
+        "maturity": "26 Sept 2025",
+        "unique_id": "BTCUSDT_BINANCE_SEP_2025"
+    }
+    """
+    # Convert percentages to decimals
+    implied_apr = market_data.get("implied", 0) / 100
+    underlying_apr = market_data.get("underlying", 0) / 100
+
+    # Parse maturity date if possible
+    maturity_str = market_data.get("maturity", "")
+    maturity_date = None
+    try:
+        # Try common formats
+        for fmt in ["%d %b %Y", "%d %B %Y", "%Y-%m-%d"]:
+            try:
+                maturity_date = datetime.strptime(maturity_str, fmt)
+                break
+            except ValueError:
+                continue
+    except Exception:
+        pass
+
+    # Parse open interest and volume from raw text if available
+    open_interest = 0.0
+    volume_24h = 0.0
+    raw_text = market_data.get("raw", "")
+    if "Open Interest:" in raw_text:
+        try:
+            oi_part = raw_text.split("Open Interest:")[1].split("\n")[0]
+            oi_value = ''.join(c for c in oi_part if c.isdigit() or c == '.')
+            open_interest = float(oi_value) if oi_value else 0.0
+        except Exception:
+            pass
+    if "24h Volume:" in raw_text:
+        try:
+            vol_part = raw_text.split("24h Volume:")[1].split("\n")[0]
+            vol_value = ''.join(c for c in vol_part if c.isdigit() or c == '.')
+            volume_24h = float(vol_value) if vol_value else 0.0
+        except Exception:
+            pass
+
+    return BorosMarket(
+        symbol=market_data.get("unique_id", market_data.get("market", "UNKNOWN")),
+        base_asset=market_data.get("market", "UNKNOWN"),
+        exchange=market_data.get("exchange", "Unknown"),
+        maturity=maturity_str,
+        maturity_date=maturity_date,
+        implied_apr=implied_apr,
+        underlying_apr=underlying_apr,
+        open_interest=open_interest,
+        volume_24h=volume_24h
+    )
+
+
+# =============================================================================
+# BACKWARD COMPATIBILITY: MarketCondition wrapper
+# =============================================================================
+
+@dataclass
+class MarketCondition:
+    """
+    Legacy compatibility wrapper - maps to BorosMarket.
+
+    DEPRECATED: Use BorosMarket directly for new code.
+    """
+    symbol: str
+    cex_funding_rate: float      # Actually underlying_apr
+    boros_implied_apr: float     # implied_apr
+    spread: float
+    volatility: float = 0.3
+    liquidity: float = 1000000
+    time_to_next_funding: timedelta = field(default_factory=lambda: timedelta(hours=4))
+
+    def to_boros_market(self, exchange: str = "Binance", maturity: str = "Unknown") -> BorosMarket:
+        """Convert to BorosMarket"""
+        return BorosMarket(
+            symbol=self.symbol,
+            base_asset=self.symbol.replace("_", "")[:7] if "_" in self.symbol else self.symbol,
+            exchange=exchange,
+            maturity=maturity,
+            implied_apr=self.boros_implied_apr,
+            underlying_apr=self.cex_funding_rate,
+            open_interest=self.liquidity / 50000,  # Rough estimate
+            volume_24h=self.liquidity / 100000
+        )
+
+
+# =============================================================================
+# TEST
+# =============================================================================
+
 async def test_strategies():
-    """Test strategy evaluation with mock market data"""
-    
-    manager = StrategyManager()
-    
-    # Mock market conditions based on real examples
-    
-    # Example 1: @ViNc2453's scenario
-    market1 = MarketCondition(
-        symbol="ETHUSDT",
-        cex_funding_rate=-0.085,  # -8.5% APY from Binance
-        boros_implied_apr=0.0633,  # +6.33% APY from Boros
-        spread=0.1483,  # 14.83% spread
-        volatility=0.3,
-        liquidity=15000000,  # $15M
-        time_to_next_funding=timedelta(hours=4)
-    )
-    
-    # Example 2: @Rightsideonly's scenario  
-    market2 = MarketCondition(
-        symbol="ETHUSDT",
-        cex_funding_rate=-0.0815,  # Receiving 8.15% from negative rates
-        boros_implied_apr=0.0669,   # Short YU-ETH at 6.69% implied APR
-        spread=0.1484,  # Large spread
-        volatility=0.25,
-        liquidity=20000000,
-        time_to_next_funding=timedelta(hours=6)
-    )
-    
-    # Test strategy evaluation
-    print("Testing Strategy 1 (Fixed/Floating Swap):")
-    opportunities1 = await manager.evaluate_all_strategies(market1)
-    for opp in opportunities1:
-        print(f"  {opp['strategy'].value}: {opp.get('expected_apy', 0):.2%} APY")
-        
-    print("\nTesting Strategy 2 (Triple Profit):")
-    opportunities2 = await manager.evaluate_all_strategies(market2)
-    for opp in opportunities2:
-        print(f"  {opp['strategy'].value}: {opp.get('expected_apy', 0):.2%} APY")
-        
-    # Test execution
-    if opportunities1 and manager.should_execute_strategy(opportunities1[0]):
-        position = await manager.execute_strategy(opportunities1[0], market1)
-        print(f"\nPosition created: {position.symbol} {position.position_type} ${position.size:,.0f}")
-        
-    # Portfolio summary
-    summary = manager.get_portfolio_summary()
-    print(f"\nPortfolio Summary:")
-    print(f"  Positions: {summary['total_positions']}")
-    print(f"  Exposure: ${summary['total_exposure']:,.0f}")
-    print(f"  Expected APY: {summary.get('weighted_expected_apy', 0):.2%}")
+    """Test strategy evaluation with sample data"""
+
+    manager = StrategyManager({"enable_settlement_carry": True})
+
+    # Create test market from typical rates.json data
+    test_data = {
+        "market": "ETHUSDT",
+        "implied": 6.10,
+        "underlying": 2.96,
+        "spread": -3.14,
+        "exchange": "Binance",
+        "maturity": "26 Sept 2025",
+        "unique_id": "ETHUSDT_BINANCE_SEP_2025",
+        "raw": "Open Interest: 6539.08 ETH\n24h Volume: 4143.80 ETH"
+    }
+
+    market = create_boros_market(test_data)
+
+    print("=" * 60)
+    print("BOROS STRATEGY TEST")
+    print("=" * 60)
+    print(f"\nMarket: {market.symbol}")
+    print(f"Exchange: {market.exchange}")
+    print(f"Maturity: {market.maturity}")
+    print(f"\nBoros Metrics:")
+    print(f"  Implied APR:    {market.implied_apr:.2%} (the 'price' of YU)")
+    print(f"  Underlying APR: {market.underlying_apr:.2%} (actual funding rate)")
+    print(f"  Spread:         {market.spread:.2%} (underlying - implied)")
+    print(f"  Open Interest:  {market.open_interest:.2f} ETH")
+
+    print("\n" + "=" * 60)
+    print("STRATEGY EVALUATION")
+    print("=" * 60)
+
+    opportunities = await manager.evaluate_all_strategies(market)
+
+    for opp in opportunities:
+        strategy = opp.get("strategy", "unknown")
+        print(f"\n--- {strategy.value if hasattr(strategy, 'value') else strategy} ---")
+        print(f"Action: {opp.get('action')}")
+        print(f"Rationale: {opp.get('rationale')}")
+        print(f"\nExpected Returns:")
+        print(f"  Settlement APY: {opp.get('expected_settlement_apy', 0):.2%}")
+        print(f"  Capital APY:    {opp.get('expected_capital_apy', 0):.2%}")
+        print(f"  Total APY:      {opp.get('expected_apy', 0):.2%}")
+        print(f"\nRisk: {opp.get('risk_score', 0):.2f}/1.0")
+        print(f"Max Position: ${opp.get('max_position_size', 0):,.0f}")
+
 
 if __name__ == "__main__":
     asyncio.run(test_strategies())

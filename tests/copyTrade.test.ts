@@ -68,6 +68,7 @@ function makeConfig(overrides?: Partial<TraderConfig["copyTrade"]>): TraderConfi
       maxNotionalUsd: 5_000,
       maxSlippage: 0.10,
       minOrderNotionalUsd: 10,
+      roundUpToMinNotional: true,
       maxConcurrentPositions: 10,
       delayBetweenOrdersMs: 0,
       deltaDeadzone: 0.001,
@@ -253,7 +254,7 @@ describe("CopyTrader", () => {
   });
 
   it("skips ENTER when order notional is below minimum", async () => {
-    const { trader, store } = await setupTrader();
+    const { trader, store } = await setupTrader({ roundUpToMinNotional: false });
 
     // Very small size: 0.001 * 3000 = $3 < $10 minimum
     mockPositions = [targetPos(1, 0, 0.001)];

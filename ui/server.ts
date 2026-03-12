@@ -9,7 +9,7 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 loadEnv({ path: path.join(ROOT, ".env") });
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: [/^https?:\/\/localhost(:\d+)?$/] }));
 app.use(express.json());
 
 const PORT = Number(process.env.UI_PORT ?? 3142);
@@ -72,6 +72,180 @@ app.get("/api/indicators/:id", async (req, res) => {
   }
 });
 
+// ---------- On-chain account data via Boros API ----------
+
+/** Convert a base-18 wei string (e.g. "77501328865054030296") to a float (≈77.50) */
+function fromBase18(s: string | undefined | null): number {
+  if (!s || s === "0") return 0;
+  try {
+    return Number(BigInt(s)) / 1e18;
+  } catch {
+    return 0;
+  }
+}
+
+app.get("/api/account", async (_req, res) => {
+  const userAddress = process.env.BOROS_ROOT_ADDRESS;
+  const accountId = process.env.BOROS_ACCOUNT_ID;
+  if (!userAddress || !accountId) {
+    return res.json({ error: "BOROS_ROOT_ADDRESS / BOROS_ACCOUNT_ID not configured" });
+  }
+  try {
+    const raw = (await borosFetch(
+      `/v1/collaterals/summary?userAddress=${userAddress}&accountId=${accountId}`
+    )) as { collaterals?: Array<Record<string, unknown>> };
+
+    const collaterals = raw.collaterals ?? [];
+    let equity = 0;
+    let availableBalance = 0;
+    let initialMarginUsed = 0;
+    let startDayEquity = 0;
+    const breakdown: Array<{
+      tokenId: number;
+      netBalance: number;
+      availableBalance: number;
+      initialMargin: number;
+    }> = [];
+
+    for (const c of collaterals) {
+      const cross = c.crossPosition as Record<string, unknown> | undefined;
+      const totalNet = fromBase18(c.totalNetBalance as string);
+      const startDay = fromBase18(c.startDayNetBalance as string);
+      const crossNet = cross ? fromBase18(cross.netBalance as string) : 0;
+      const crossAvail = cross ? fromBase18(cross.availableBalance as string) : 0;
+      const crossMargin = cross ? fromBase18(cross.initialMargin as string) : 0;
+
+      equity += totalNet;
+      startDayEquity += startDay;
+      availableBalance += crossAvail;
+      initialMarginUsed += crossMargin;
+
+      if (totalNet !== 0 || crossNet !== 0) {
+        breakdown.push({
+          tokenId: c.tokenId as number,
+          netBalance: crossNet || totalNet,
+          availableBalance: crossAvail,
+          initialMargin: crossMargin,
+        });
+      }
+    }
+
+    res.json({ equity, availableBalance, initialMarginUsed, startDayEquity, collateralBreakdown: breakdown });
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.get("/api/account/positions", async (_req, res) => {
+  const userAddress = process.env.BOROS_ROOT_ADDRESS;
+  const accountId = process.env.BOROS_ACCOUNT_ID;
+  if (!userAddress || !accountId) {
+    return res.json({ positions: [], error: "BOROS_ROOT_ADDRESS / BOROS_ACCOUNT_ID not configured" });
+  }
+  try {
+    const raw = (await borosFetch(
+      `/v1/collaterals/summary?userAddress=${userAddress}&accountId=${accountId}`
+    )) as {
+      collaterals?: Array<{
+        tokenId: number;
+        crossPosition?: {
+          marketPositions?: Array<Record<string, unknown>>;
+          netBalance?: string;
+        };
+        isolatedPositions?: Array<{
+          marketPositions?: Array<Record<string, unknown>>;
+        }>;
+      }>;
+    };
+
+    const positions: Array<{
+      marketId: number;
+      tokenId: number;
+      side: string;
+      sizeBase: number;
+      notionalUsd: number;
+      fixedApr: number;
+      markApr: number;
+      liquidationApr: number | null;
+      initialMarginUsd: number;
+      marginType: string;
+      unrealizedPnl: number;
+      liquidationBufferBps: number | null;
+    }> = [];
+
+    for (const c of raw.collaterals ?? []) {
+      // Cross positions
+      for (const mp of c.crossPosition?.marketPositions ?? []) {
+        const signedSize = mp.notionalSize !== undefined ? BigInt(String(mp.notionalSize)) : 0n;
+        const absSize = signedSize < 0n ? -signedSize : signedSize;
+        if (absSize === 0n) continue;
+        const fixedApr = Number(mp.fixedApr ?? 0);
+        const markApr = Number(mp.markApr ?? 0);
+        const isLong = signedSize >= 0n;
+        const notional = fromBase18(String(absSize));
+        // Unrealized PnL: use API field if present, else approximate from APR delta
+        const rawPnl = mp.unrealizedPnl !== undefined ? fromBase18(String(mp.unrealizedPnl)) : null;
+        const unrealizedPnl = rawPnl ?? (isLong ? (markApr - fixedApr) : (fixedApr - markApr)) * notional;
+        // Liquidation buffer in bps
+        const liqApr = mp.liquidationApr !== undefined ? Number(mp.liquidationApr) : null;
+        const liquidationBufferBps = liqApr != null
+          ? Math.abs(markApr - liqApr) * 10000
+          : null;
+        positions.push({
+          marketId: Number(mp.marketId ?? 0),
+          tokenId: c.tokenId,
+          side: isLong ? "LONG" : "SHORT",
+          sizeBase: Number(absSize) / 1e18,
+          notionalUsd: notional,
+          fixedApr,
+          markApr,
+          liquidationApr: liqApr,
+          initialMarginUsd: fromBase18(mp.initialMargin as string),
+          marginType: "cross",
+          unrealizedPnl,
+          liquidationBufferBps,
+        });
+      }
+      // Isolated positions
+      for (const iso of c.isolatedPositions ?? []) {
+        for (const mp of iso.marketPositions ?? []) {
+          const signedSize = mp.notionalSize !== undefined ? BigInt(String(mp.notionalSize)) : 0n;
+          const absSize = signedSize < 0n ? -signedSize : signedSize;
+          if (absSize === 0n) continue;
+          const fixedApr = Number(mp.fixedApr ?? 0);
+          const markApr = Number(mp.markApr ?? 0);
+          const isLong = signedSize >= 0n;
+          const notional = fromBase18(String(absSize));
+          const rawPnl = mp.unrealizedPnl !== undefined ? fromBase18(String(mp.unrealizedPnl)) : null;
+          const unrealizedPnl = rawPnl ?? (isLong ? (markApr - fixedApr) : (fixedApr - markApr)) * notional;
+          const liqApr = mp.liquidationApr !== undefined ? Number(mp.liquidationApr) : null;
+          const liquidationBufferBps = liqApr != null
+            ? Math.abs(markApr - liqApr) * 10000
+            : null;
+          positions.push({
+            marketId: Number(mp.marketId ?? 0),
+            tokenId: c.tokenId,
+            side: isLong ? "LONG" : "SHORT",
+            sizeBase: Number(absSize) / 1e18,
+            notionalUsd: notional,
+            fixedApr,
+            markApr,
+            liquidationApr: liqApr,
+            initialMarginUsd: fromBase18(mp.initialMargin as string),
+            marginType: "isolated",
+            unrealizedPnl,
+            liquidationBufferBps,
+          });
+        }
+      }
+    }
+
+    res.json({ positions });
+  } catch (err) {
+    res.status(502).json({ positions: [], error: String(err) });
+  }
+});
+
 // ---------- SQLite endpoints ----------
 
 app.get("/api/positions", (_req, res) => {
@@ -118,6 +292,41 @@ app.get("/api/kill-events", (_req, res) => {
   }
 });
 
+// ---------- Copy trade endpoints ----------
+
+app.get("/api/copy-positions", (_req, res) => {
+  const store = getDb();
+  if (!store) return res.json([]);
+  try {
+    const rows = store.prepare("SELECT * FROM copy_positions WHERE status = 'OPEN' ORDER BY opened_at ASC").all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/copy-trades", (_req, res) => {
+  const store = getDb();
+  if (!store) return res.json([]);
+  try {
+    const rows = store.prepare("SELECT * FROM copy_trade_records ORDER BY recorded_at DESC LIMIT 50").all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/copy-targets", (_req, res) => {
+  const store = getDb();
+  if (!store) return res.json([]);
+  try {
+    const rows = store.prepare("SELECT * FROM copy_target_snapshots ORDER BY recorded_at DESC LIMIT 1").all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ---------- JSON file endpoints ----------
 
 app.get("/api/rates", (_req, res) => {
@@ -153,12 +362,15 @@ app.get("/api/state", (_req, res) => {
   if (store) {
     try {
       const latest = store.prepare("SELECT * FROM kill_switch_events ORDER BY recorded_at DESC LIMIT 1").get() as Record<string, unknown> | undefined;
-      if (latest) killSwitchActive = true;
+      if (latest && latest.reason && !(latest.reason as string).toLowerCase().includes("resolved")) {
+        killSwitchActive = true;
+      }
     } catch { /* empty */ }
   }
 
   res.json({
     mode: process.env.BOROS_MODE ?? "paper",
+    copyTradeEnabled: process.env.BOROS_COPY_TRADE_ENABLED === "true",
     strategyState,
     runtimeState,
     killSwitchActive,
@@ -269,8 +481,17 @@ app.post("/api/settings", (req, res) => {
 
 // ---------- Start ----------
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`[boros-ui] API server running on http://localhost:${PORT}`);
   console.log(`[boros-ui] Boros API: ${BOROS_API}`);
   console.log(`[boros-ui] SQLite: ${SQLITE_PATH}`);
+});
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`[boros-ui] Port ${PORT} already in use. Set UI_PORT in .env to use a different port.`);
+  } else {
+    console.error(`[boros-ui] Server error: ${err.message}`);
+  }
+  process.exit(1);
 });

@@ -1,3 +1,9 @@
+"""
+DEPRECATED — This file is legacy Python code from the early prototype.
+The active system is the TypeScript bot in src/ (run via `npm run boros`).
+This file is kept for reference only and will be removed in a future cleanup.
+"""
+
 import asyncio
 import json
 import os
@@ -27,11 +33,10 @@ OUTPUT_JSON = os.getenv("OUTPUT_JSON", "rates.json")
 # Markets to query from the bot's inline keyboard (exact button text)
 MARKETS: List[str] = [
     "BTCUSDT Binance 26 Sept 2025",
-    "ETHUSDT Binance 26 Sept 2025", 
-    "BTCUSDT Binance 26 Dec 2025",
-    "ETHUSDT Binance 26 Dec 2025",
-    "BTC-USD Hyperliquid 31 Oct 2025",
-    "ETH-USD Hyperliquid 31 Oct 2025",
+    "ETHUSDT Binance 26 Sept 2025",
+    "BTCUSDT Binance 26 Sept 2025",
+    "ETHUSDT Binance 26 Sept 2025",
+    
 ]
 
 IMPLIED_RE = re.compile(r"Implied\s*APR[:\s]*([\d.]+)%", re.I)
@@ -44,25 +49,18 @@ SHORT_SPREAD_BPS = -50
 
 @dataclass
 class MarketData:
-    market: str  # Normalized symbol (e.g., "BTCUSDT")
+    market: str
     implied: float
     underlying: float
     days: Optional[int]
     raw: str
-    exchange: str  # "Binance" or "Hyperliquid"
-    maturity: str  # "26 Sept 2025", "26 Dec 2025", "31 Oct 2025"
-    unique_id: str  # "BTCUSDT_BINANCE_SEPT_2025"
 
 
 def alert(text: str) -> None:
     """Send alert message using Telegram Bot API (optional)."""
     if not ALERT_BOT_TOKEN or not ALERT_CHAT_ID:
         # Alerts optional: print locally if bot not configured
-        try:
-            print("ALERT:", text)
-        except UnicodeEncodeError:
-            # Fallback for Windows console encoding issues
-            print("ALERT:", text.encode('ascii', 'replace').decode('ascii'))
+        print("ALERT:", text)
         return
     try:
         requests.post(
@@ -71,10 +69,7 @@ def alert(text: str) -> None:
             timeout=10,
         )
     except Exception as exc:  # pragma: no cover - network errors
-        try:
-            print("Alert error:", exc)
-        except UnicodeEncodeError:
-            print("Alert error:", str(exc).encode('ascii', 'replace').decode('ascii'))
+        print("Alert error:", exc)
 
 
 def parse_rates(msg_text: str) -> tuple[Optional[float], Optional[float], Optional[int]]:
@@ -94,110 +89,36 @@ def parse_rates(msg_text: str) -> tuple[Optional[float], Optional[float], Option
 async def fetch_market(client: TelegramClient, market_button_text: str) -> MarketData:
     if not TARGET_BOT:
         raise RuntimeError("TARGET_BOT is required (bot username) to fetch data")
-    
-    print(f"Fetching market: {market_button_text}")
-    
-    # Get the latest menu message and ensure it has the keyboard
+    # Assume we're already on the main menu; grab the latest menu message
     menu: Message = (await client.get_messages(TARGET_BOT, limit=1))[0]
-    
-    # Check if menu has inline keyboard, if not send /start to get it
-    if not (hasattr(menu, 'reply_markup') and menu.reply_markup):
-        print("No keyboard found, sending /start...")
-        await client.send_message(TARGET_BOT, "/start")
-        await asyncio.sleep(1.0)
-        menu: Message = (await client.get_messages(TARGET_BOT, limit=1))[0]
-    
     try:
         await menu.click(text=market_button_text)
-        await asyncio.sleep(1.0)  # Wait longer for response
+        await asyncio.sleep(0.5)
         reply: Message = (await client.get_messages(TARGET_BOT, limit=1))[0]
-        
-        # Verify we got market data, not the menu
-        if "Select a market you want to view" in reply.message:
-            print(f"Still on menu after clicking {market_button_text}, trying again...")
-            await asyncio.sleep(1.0)
-            await menu.click(text=market_button_text)
-            await asyncio.sleep(1.0)
-            reply: Message = (await client.get_messages(TARGET_BOT, limit=1))[0]
-            
     except Exception as exc:
-        try:
-            error_msg = str(exc)
-            print(f"Click error: {error_msg}")
-        except UnicodeEncodeError:
-            error_msg = str(exc).encode('ascii', 'replace').decode('ascii')
-            print(f"Click error (encoded): {error_msg}")
-        raise RuntimeError(f"Could not click '{market_button_text}': {error_msg}")
+        raise RuntimeError(f"Could not click '{market_button_text}': {exc}")
 
     implied, underlying, days = parse_rates(reply.message)
-    
     if implied is None or underlying is None:
-        # Try getting another message in case there's a delay
-        await asyncio.sleep(1.0)
         reply = (await client.get_messages(TARGET_BOT, limit=1))[0]
         implied, underlying, days = parse_rates(reply.message)
 
     if implied is None or underlying is None:
-        # Save debug info and fail
-        with open(f"debug_{market_button_text.replace(' ', '_').lower()}.txt", "w", encoding="utf-8") as f:
-            f.write(reply.message)
         raise RuntimeError(f"Failed to parse rates for {market_button_text}")
 
     # Go back to the main menu to prepare for the next market
     try:
-        await reply.click(text="Back to Main Menu")
+        await reply.click(text="Back to main menu")
         await asyncio.sleep(0.4)
-    except Exception as e:
-        try:
-            # Try alternative text
-            await reply.click(text="Back to main menu")
-            await asyncio.sleep(0.4)
-        except Exception as e2:
-            print(f"Warning: Could not click back button: {e2}")
-            # Send /start to reset to main menu
-            await client.send_message(TARGET_BOT, "/start")
-            await asyncio.sleep(0.4)
+    except Exception:
+        pass
 
-    # Extract market details from full button text
-    # Example: "BTCUSDT Binance 26 Sept 2025" or "BTC-USD Hyperliquid 31 Oct 2025"
-    parts = market_button_text.split() if market_button_text else []
-    
-    if len(parts) >= 4:
-        symbol_part = parts[0]
-        exchange = parts[1]  # "Binance" or "Hyperliquid"
-        maturity = " ".join(parts[2:])  # "26 Sept 2025" or "31 Oct 2025"
-        
-        # Normalize symbol format
-        if "-USD" in symbol_part and "USDT" not in symbol_part:
-            market_name = symbol_part.replace("-USD", "USDT")
-        else:
-            market_name = symbol_part
-            
-        # Create unique identifier
-        # Convert "26 Sept 2025" -> "SEPT_2025", "26 Dec 2025" -> "DEC_2025", "31 Oct 2025" -> "OCT_2025"
-        maturity_parts = maturity.split()
-        if len(maturity_parts) >= 3:
-            month = maturity_parts[1][:3].upper()  # "Sept" -> "SEP", "Dec" -> "DEC", "Oct" -> "OCT"
-            year = maturity_parts[2]  # "2025"
-            unique_id = f"{market_name}_{exchange.upper()}_{month}_{year}"
-        else:
-            unique_id = f"{market_name}_{exchange.upper()}"
-    else:
-        # Fallback for malformed button text
-        market_name = parts[0] if parts else market_button_text
-        exchange = "UNKNOWN"
-        maturity = "UNKNOWN"
-        unique_id = market_name
-    
     return MarketData(
-        market=market_name,
+        market=market_button_text,
         implied=implied,
         underlying=underlying,
         days=days,
         raw=reply.message[:1000],
-        exchange=exchange,
-        maturity=maturity,
-        unique_id=unique_id,
     )
 
 
@@ -210,32 +131,17 @@ async def main() -> None:
 
         # Start once to reach the bot's main menu
         await client.send_message(TARGET_BOT, "/start")
-        await asyncio.sleep(1.0)  # Give more time for bot to respond
+        await asyncio.sleep(0.4)
 
         results: List[MarketData] = []
-        for i, market in enumerate(MARKETS):
+        for market in MARKETS:
             try:
-                print(f"\n--- Processing market {i+1}/{len(MARKETS)}: {market} ---")
                 data = await fetch_market(client, market)
                 results.append(data)
-                try:
-                    print(f"✅ Successfully fetched {data.market}: Implied {data.implied}% | Underlying {data.underlying}%")
-                except UnicodeEncodeError:
-                    print(f"[SUCCESS] Fetched {data.market}: Implied {data.implied}% | Underlying {data.underlying}%")
             except FloodWaitError as exc:
                 print("Rate limited, sleeping", exc.seconds)
-                await asyncio.sleep(exc.seconds + 1)
-                # Retry after rate limit
-                try:
-                    data = await fetch_market(client, market)
-                    results.append(data)
-                except Exception as retry_exc:
-                    alert(f"⚠️ Could not fetch {market} after retry: {retry_exc}")
+                time.sleep(exc.seconds + 1)
             except Exception as exc:
-                try:
-                    print(f"❌ Failed to fetch {market}: {exc}")
-                except UnicodeEncodeError:
-                    print(f"[FAILED] Could not fetch {market}: {exc}")
                 alert(f"⚠️ Could not fetch {market}: {exc}")
 
         for d in results:
@@ -259,7 +165,7 @@ async def main() -> None:
         # Save results to JSON for offline use
         try:
             payload = {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.utcnow().isoformat() + "Z",
                 "markets": [
                     {
                         "market": d.market,
@@ -269,9 +175,6 @@ async def main() -> None:
                         "spread": round(d.underlying - d.implied, 6),
                         "spread_bps": round((d.underlying - d.implied) * 100, 3),
                         "raw": d.raw,
-                        "exchange": d.exchange,
-                        "maturity": d.maturity,
-                        "unique_id": d.unique_id,
                     }
                     for d in results
                 ],

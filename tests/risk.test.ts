@@ -51,6 +51,7 @@ const config: TraderConfig = {
     maxNotionalUsd: 5_000,
     maxSlippage: 0.10,
     minOrderNotionalUsd: 10,
+    roundUpToMinNotional: true,
     maxConcurrentPositions: 10,
     delayBetweenOrdersMs: 500,
     deltaDeadzone: 0.001,

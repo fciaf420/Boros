@@ -49,13 +49,18 @@ export class CopyExecutor {
       sizeBase = liquidityCap;
     }
 
+    // Round up or skip orders below exchange minimum
+    const preNotionalUsd = sizeBase * market.assetMarkPrice;
+    if (preNotionalUsd < this.config.minOrderNotionalUsd) {
+      if (this.config.roundUpToMinNotional && action !== "EXIT") {
+        sizeBase = this.config.minOrderNotionalUsd / market.assetMarkPrice;
+      } else {
+        throw new Error(`Order notional $${preNotionalUsd.toFixed(2)} below $${this.config.minOrderNotionalUsd} minimum`);
+      }
+    }
+
     const sizeBase18 = toBase18(sizeBase);
     const finalNotionalUsd = sizeBase * market.assetMarkPrice;
-
-    // Skip orders below exchange minimum
-    if (finalNotionalUsd < this.config.minOrderNotionalUsd) {
-      throw new Error(`Order notional $${finalNotionalUsd.toFixed(2)} below $${this.config.minOrderNotionalUsd} minimum`);
-    }
 
     // Use taker for copy trades (we want immediate fills)
     const orderIntent = "taker" as const;

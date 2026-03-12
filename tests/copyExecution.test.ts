@@ -10,6 +10,7 @@ const config: CopyTradeConfig = {
   maxNotionalUsd: 5000,
   maxSlippage: 0.10,
   minOrderNotionalUsd: 10,
+  roundUpToMinNotional: true,
   maxConcurrentPositions: 10,
   delayBetweenOrdersMs: 500,
   deltaDeadzone: 0.001,
@@ -79,9 +80,16 @@ describe("CopyExecutor", () => {
     expect(candidate.notionalUsd).toBeLessThanOrEqual(5000);
   });
 
-  it("throws when final notional is below minOrderNotionalUsd", async () => {
-    // Very small size: 0.001 * 3000 = $3 < $10 minimum
+  it("rounds up to minimum notional when roundUpToMinNotional is true", async () => {
+    // Very small size: 0.001 * 3000 = $3 < $10 minimum → rounds up to $10
     const executor = new CopyExecutor(config, createMockApi());
+    const candidate = await executor.buildCopyCandidate(makeDelta({ sizeChangeBase: 0.001 }), market);
+    expect(candidate.notionalUsd).toBeGreaterThanOrEqual(config.minOrderNotionalUsd);
+  });
+
+  it("throws when final notional is below min and roundUpToMinNotional is false", async () => {
+    const noRoundUp = { ...config, roundUpToMinNotional: false };
+    const executor = new CopyExecutor(noRoundUp, createMockApi());
     await expect(
       executor.buildCopyCandidate(makeDelta({ sizeChangeBase: 0.001 }), market),
     ).rejects.toThrow("below $");

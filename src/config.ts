@@ -165,6 +165,7 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
       maxSlippage: getOptionalNumber("BOROS_COPY_TRADE_MAX_SLIPPAGE", 0.10),
       discordWebhookUrl: process.env.BOROS_COPY_TRADE_DISCORD_WEBHOOK_URL || undefined,
       minOrderNotionalUsd: getOptionalNumber("BOROS_COPY_TRADE_MIN_ORDER_NOTIONAL_USD", 10),
+      roundUpToMinNotional: getOptionalBoolean("BOROS_COPY_TRADE_ROUND_UP_TO_MIN", true),
       maxConcurrentPositions: getOptionalNumber("BOROS_COPY_TRADE_MAX_CONCURRENT_POSITIONS", 10),
       delayBetweenOrdersMs: getOptionalNumber("BOROS_COPY_TRADE_DELAY_BETWEEN_ORDERS_MS", 500),
       deltaDeadzone: getOptionalNumber("BOROS_COPY_TRADE_DELTA_DEADZONE", 0.001),

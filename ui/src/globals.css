@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* User's custom cosmic palette */
+  --color-background: #181413;
+  --color-surface: #171824;
+  --color-card: #1A1D41;
+  --color-card-foreground: #E8ECF4;
+
+  /* Borders */
+  --color-border: rgba(154, 126, 106, 0.15);
+  --color-border-active: rgba(230, 129, 84, 0.3);
+
+  /* Text */
+  --color-text-primary: #E8ECF4;
+  --color-text-secondary: #ADA29F;
+  --color-text-muted: #9A7E6A;
+
+  /* Trading colors */
+  --color-green: #0ECB81;
+  --color-red: #F6465D;
+
+  /* Accents */
+  --color-coral: #E68154;
+  --color-amber: #D4A843;
+  --color-blue: #3B7AFF;
+
+  /* Fonts */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+}
+
+/* ========== Global resets ========== */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ========== Custom scrollbar ========== */
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-text-muted);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-secondary);
+}
+
+/* ========== Utility ========== */
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+}
+
+.loading-dots::after {
+  content: "";
+  animation: dots 1.5s step-end infinite;
+}

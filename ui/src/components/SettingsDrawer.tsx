@@ -1,4 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "./ui/sheet";
+import { Button } from "./ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { Info } from "lucide-react";
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -66,6 +70,7 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
   BOROS_COPY_TRADE_MAX_SLIPPAGE: "Maximum slippage for copy trade execution (0.10 = 10%). Range: 0.01-0.50.",
   BOROS_COPY_TRADE_POLLING_MS: "Milliseconds between polling for target position changes. Range: 5000-60000.",
   BOROS_COPY_TRADE_MIN_ORDER_NOTIONAL_USD: "Minimum notional for copy trade orders. Range: 1-100.",
+  BOROS_COPY_TRADE_ROUND_UP_TO_MIN: "When 'true', rounds up sub-minimum orders to the minimum notional instead of skipping them. Default: true.",
   BOROS_COPY_TRADE_MAX_CONCURRENT_POSITIONS: "Maximum concurrent copy positions. Range: 1-20.",
   BOROS_COPY_TRADE_DELAY_BETWEEN_ORDERS_MS: "Delay in ms between successive copy trade orders. Prevents rapid-fire. Range: 100-5000.",
   BOROS_COPY_TRADE_DELTA_DEADZONE: "Minimum position size change to trigger a copy action (0.001 = 0.1%). Range: 0.0001-0.01.",
@@ -105,16 +110,32 @@ const SECTIONS: Array<{ title: string; keys: string[] }> = [
   },
   {
     title: "Copy Trade",
-    keys: ["BOROS_COPY_TRADE_ENABLED", "BOROS_COPY_TRADE_SIZE_RATIO", "BOROS_COPY_TRADE_MAX_NOTIONAL_USD", "BOROS_COPY_TRADE_MAX_SLIPPAGE", "BOROS_COPY_TRADE_POLLING_MS", "BOROS_COPY_TRADE_MIN_ORDER_NOTIONAL_USD", "BOROS_COPY_TRADE_MAX_CONCURRENT_POSITIONS", "BOROS_COPY_TRADE_DELAY_BETWEEN_ORDERS_MS", "BOROS_COPY_TRADE_DELTA_DEADZONE", "BOROS_COPY_TRADE_MAX_FAILURE_STREAK", "BOROS_COPY_TRADE_MAX_DAILY_DRAWDOWN_PCT", "BOROS_COPY_TRADE_MIN_LIQUIDITY_COVERAGE"],
+    keys: ["BOROS_COPY_TRADE_ENABLED", "BOROS_COPY_TRADE_SIZE_RATIO", "BOROS_COPY_TRADE_MAX_NOTIONAL_USD", "BOROS_COPY_TRADE_MAX_SLIPPAGE", "BOROS_COPY_TRADE_POLLING_MS", "BOROS_COPY_TRADE_MIN_ORDER_NOTIONAL_USD", "BOROS_COPY_TRADE_ROUND_UP_TO_MIN", "BOROS_COPY_TRADE_MAX_CONCURRENT_POSITIONS", "BOROS_COPY_TRADE_DELAY_BETWEEN_ORDERS_MS", "BOROS_COPY_TRADE_DELTA_DEADZONE", "BOROS_COPY_TRADE_MAX_FAILURE_STREAK", "BOROS_COPY_TRADE_MAX_DAILY_DRAWDOWN_PCT", "BOROS_COPY_TRADE_MIN_LIQUIDITY_COVERAGE"],
   },
 ];
 
-function Tooltip({ text }: { text: string }) {
+const SECTION_KEY_SET = new Set(SECTIONS.flatMap((s) => s.keys));
+
+const CRITICAL_KEYS = new Set([
+  "BOROS_MODE",
+  "BOROS_MAX_DAILY_DRAWDOWN_PCT",
+  "BOROS_MAX_FAILURE_STREAK",
+  "BOROS_MAX_EFFECTIVE_LEVERAGE",
+  "BOROS_COPY_TRADE_ENABLED",
+  "BOROS_COPY_TRADE_SIZE_RATIO",
+  "BOROS_COPY_TRADE_MAX_NOTIONAL_USD",
+]);
+
+function SettingTooltip({ text }: { text: string }) {
   return (
-    <span className="tooltip-trigger">
-      ?
-      <span className="tooltip-content">{text}</span>
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex items-center justify-center size-3.5 rounded-full border border-text-muted/40 text-text-muted cursor-help shrink-0">
+          <Info className="size-2.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{text}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -123,6 +144,7 @@ export default function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saveMsg, setSaveMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pendingCritical, setPendingCritical] = useState<Record<string, { from: string; to: string }> | null>(null);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -141,8 +163,29 @@ export default function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setDraft((prev) => ({ ...prev, [key]: value }));
   };
 
+  const executeSave = async (changes: Record<string, string>) => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const data = await res.json() as { ok?: boolean; message?: string; error?: string };
+      if (data.ok) {
+        setSaveMsg(data.message ?? "Saved.");
+        setSettings((prev) => ({ ...prev, ...changes }));
+      } else {
+        setSaveMsg(`Error: ${data.error ?? "Unknown error"}`);
+      }
+    } catch (err) {
+      setSaveMsg(`Error: ${String(err)}`);
+    }
+    setLoading(false);
+    setTimeout(() => setSaveMsg(""), 5000);
+  };
+
   const handleSave = async () => {
-    // Find changed values
     const changes: Record<string, string> = {};
     for (const [key, val] of Object.entries(draft)) {
       if (val !== settings[key]) {
@@ -155,110 +198,135 @@ export default function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       return;
     }
 
-    setLoading(true);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(changes),
-      });
-      const data = await res.json() as { ok?: boolean; message?: string; error?: string };
-      if (data.ok) {
-        setSaveMsg(data.message ?? "Saved.");
-        setSettings({ ...settings, ...changes });
-      } else {
-        setSaveMsg(`Error: ${data.error ?? "Unknown error"}`);
+    // Check if any critical keys are being changed
+    const criticalChanges: Record<string, { from: string; to: string }> = {};
+    for (const [key, val] of Object.entries(changes)) {
+      if (CRITICAL_KEYS.has(key)) {
+        criticalChanges[key] = { from: settings[key] ?? "", to: val };
       }
-    } catch (err) {
-      setSaveMsg(`Error: ${String(err)}`);
     }
-    setLoading(false);
-    setTimeout(() => setSaveMsg(""), 5000);
+
+    if (Object.keys(criticalChanges).length > 0) {
+      setPendingCritical(criticalChanges);
+      return;
+    }
+
+    await executeSave(changes);
   };
 
-  const changedKeys = new Set(
-    Object.entries(draft).filter(([k, v]) => v !== settings[k]).map(([k]) => k)
+  const changedKeys = useMemo(
+    () => new Set(Object.entries(draft).filter(([k, v]) => v !== settings[k]).map(([k]) => k)),
+    [draft, settings]
   );
 
-  return (
-    <>
-      <div className={`drawer-overlay ${open ? "drawer-overlay--open" : ""}`} onClick={onClose} />
-      <div className={`drawer ${open ? "drawer--open" : ""}`}>
-        <div className="drawer__header">
-          <span className="drawer__title">ENV SETTINGS</span>
-          <button className="drawer__close" onClick={onClose}>[ESC] CLOSE</button>
-        </div>
-
-        <div className="drawer__body">
-          {SECTIONS.map((section) => {
-            const sectionKeys = section.keys.filter((k) => k in draft);
-            if (sectionKeys.length === 0) return null;
-            return (
-              <div className="drawer__section" key={section.title}>
-                <div className="drawer__section-title">{section.title}</div>
-                {sectionKeys.map((key) => (
-                  <div className="drawer__field" key={key}>
-                    <label className="drawer__field-label">
-                      <span style={changedKeys.has(key) ? { color: "var(--amber)" } : undefined}>
-                        {key}
-                      </span>
-                      {SETTING_DESCRIPTIONS[key] && (
-                        <Tooltip text={SETTING_DESCRIPTIONS[key]} />
-                      )}
-                    </label>
-                    <input
-                      className="drawer__field-input"
-                      value={draft[key] ?? ""}
-                      onChange={(e) => handleChange(key, e.target.value)}
-                    />
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-
-          {/* Show any BOROS_ keys not in sections */}
-          {(() => {
-            const sectionKeySet = new Set(SECTIONS.flatMap((s) => s.keys));
-            const extraKeys = Object.keys(draft).filter(
-              (k) => k.startsWith("BOROS_") && !sectionKeySet.has(k)
-            );
-            if (extraKeys.length === 0) return null;
-            return (
-              <div className="drawer__section">
-                <div className="drawer__section-title">Other</div>
-                {extraKeys.map((key) => (
-                  <div className="drawer__field" key={key}>
-                    <label className="drawer__field-label">
-                      <span style={changedKeys.has(key) ? { color: "var(--amber)" } : undefined}>
-                        {key}
-                      </span>
-                      {SETTING_DESCRIPTIONS[key] && (
-                        <Tooltip text={SETTING_DESCRIPTIONS[key]} />
-                      )}
-                    </label>
-                    <input
-                      className="drawer__field-input"
-                      value={draft[key] ?? ""}
-                      onChange={(e) => handleChange(key, e.target.value)}
-                    />
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-        </div>
-
-        <div className="drawer__warning">
-          Restart the trader process for changes to take effect.
-        </div>
-        <div className="drawer__footer">
-          <button className="drawer__save-btn" onClick={handleSave} disabled={loading}>
-            {loading ? "SAVING..." : `SAVE${changedKeys.size > 0 ? ` (${changedKeys.size})` : ""}`}
-          </button>
-          {saveMsg && <span className="drawer__save-msg">{saveMsg}</span>}
-        </div>
+  const renderFields = (keys: string[]) =>
+    keys.filter((k) => k in draft).map((key) => (
+      <div className="flex flex-col gap-1 mb-3" key={key}>
+        <label className="flex items-center gap-1.5 text-[10px] text-text-muted tracking-wide">
+          <span className={changedKeys.has(key) ? "text-coral" : undefined}>
+            {key}
+          </span>
+          {SETTING_DESCRIPTIONS[key] && (
+            <SettingTooltip text={SETTING_DESCRIPTIONS[key]} />
+          )}
+        </label>
+        <input
+          className="w-full bg-background border border-border text-text-primary font-mono text-xs px-2 py-1.5 outline-none focus:border-coral focus:ring-1 focus:ring-coral/30 transition-colors"
+          value={draft[key] ?? ""}
+          onChange={(e) => handleChange(key, e.target.value)}
+        />
       </div>
-    </>
+    ));
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Sheet open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>Settings</SheetTitle>
+            <SheetDescription className="sr-only">Environment configuration settings</SheetDescription>
+          </SheetHeader>
+
+          <div className="flex-1 overflow-y-auto px-4 py-3">
+            {SECTIONS.map((section) => {
+              const sectionKeys = section.keys.filter((k) => k in draft);
+              if (sectionKeys.length === 0) return null;
+              return (
+                <div className="mb-5" key={section.title}>
+                  <h3 className="text-[11px] font-semibold tracking-[1.5px] uppercase text-coral mb-2 pb-1 border-b border-coral/20">
+                    {section.title}
+                  </h3>
+                  {renderFields(sectionKeys)}
+                </div>
+              );
+            })}
+
+            {/* Uncategorized BOROS_ keys */}
+            {(() => {
+              const extraKeys = Object.keys(draft).filter(
+                (k) => k.startsWith("BOROS_") && !SECTION_KEY_SET.has(k)
+              );
+              if (extraKeys.length === 0) return null;
+              return (
+                <div className="mb-5">
+                  <h3 className="text-[11px] font-semibold tracking-[1.5px] uppercase text-coral mb-2 pb-1 border-b border-coral/20">
+                    Other
+                  </h3>
+                  {renderFields(extraKeys)}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Critical settings confirmation overlay */}
+          {pendingCritical && (
+            <div className="mx-4 my-3 border-2 border-amber/60 bg-amber/10 rounded p-3">
+              <p className="text-[11px] font-semibold text-amber mb-2">Confirm critical changes:</p>
+              {Object.entries(pendingCritical).map(([key, { from, to }]) => (
+                <div key={key} className="text-[10px] font-mono mb-1">
+                  <span className="text-text-muted">{key}:</span>{" "}
+                  <span className="text-red line-through">{from || "(empty)"}</span>{" "}
+                  <span className="text-green">{to}</span>
+                </div>
+              ))}
+              <div className="flex gap-2 mt-3">
+                <Button
+                  size="sm"
+                  className="text-[10px] bg-amber/20 text-amber hover:bg-amber/30 border border-amber/40"
+                  onClick={async () => {
+                    const allChanges: Record<string, string> = {};
+                    for (const [key, val] of Object.entries(draft)) {
+                      if (val !== settings[key]) allChanges[key] = val;
+                    }
+                    setPendingCritical(null);
+                    await executeSave(allChanges);
+                  }}
+                >
+                  Confirm
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-[10px]"
+                  onClick={() => setPendingCritical(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+
+          <div className="text-[10px] text-text-muted px-4 py-2 border-t border-border/50">
+            Restart the trader process for changes to take effect.
+          </div>
+          <div className="flex items-center gap-3 px-4 py-3 border-t border-border">
+            <Button onClick={handleSave} disabled={loading || !!pendingCritical} className="text-xs">
+              {loading ? "Saving..." : `Save${changedKeys.size > 0 ? ` (${changedKeys.size})` : ""}`}
+            </Button>
+            {saveMsg && <span className="text-xs text-green animate-in fade-in">{saveMsg}</span>}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </TooltipProvider>
   );
 }

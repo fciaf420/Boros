@@ -230,6 +230,7 @@ export interface CopyTradeConfig {
   maxSlippage: number;
   discordWebhookUrl?: string;
   minOrderNotionalUsd: number;
+  roundUpToMinNotional: boolean;
   maxConcurrentPositions: number;
   delayBetweenOrdersMs: number;
   deltaDeadzone: number;
