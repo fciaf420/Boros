@@ -145,8 +145,8 @@ Tracks highest PnL ever reached, used for trailing stop calculation.
 | maxInitialMarginPctPerMarket | 0.10 | Max 10% per market |
 | maxConcurrentMarkets | 3 | Max simultaneous positions |
 | maxEffectiveLeverage | 1.5 | Max leverage per trade |
-| maxDailyDrawdownPct | 0.03 | Kill switch at -3% daily |
-| maxFailureStreak | 2 | Kill switch after 2 failures |
+| maxDailyDrawdownPct | 0.25 | Kill switch at -25% daily |
+| maxFailureStreak | 20 | Kill switch after 20 failures |
 
 ### Entry gates
 | Check | Threshold | Description |
@@ -233,8 +233,8 @@ Recoverable via: `appendKillSwitchEvent("resolved", { reason: "..." })`
 | MAX_TOTAL_INITIAL_MARGIN_PCT | 0.35 | 35% total |
 | MAX_CONCURRENT_MARKETS | 3 | Position limit |
 | MAX_EFFECTIVE_LEVERAGE | 1.5 | Leverage cap |
-| MAX_DAILY_DRAWDOWN_PCT | 0.03 | 3% daily stop |
-| MAX_FAILURE_STREAK | 2 | Failure kill switch |
+| MAX_DAILY_DRAWDOWN_PCT | 0.25 | 25% daily stop |
+| MAX_FAILURE_STREAK | 20 | Failure kill switch |
 | MIN_LIQUIDITY_COVERAGE | 3 | Book depth requirement |
 | MIN_ENTRY_LIQ_BUFFER_BPS | 400 | Entry liq buffer |
 | MIN_MAINTAIN_LIQ_BUFFER_BPS | 200 | Ongoing liq buffer |
