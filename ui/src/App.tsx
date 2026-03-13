@@ -70,10 +70,14 @@ export default function App() {
     (copyPositions.data && copyPositions.data.length > 0) ||
     (copyTrades.data && copyTrades.data.length > 0);
 
-  // Auto-sync tab from mode detection
+  // Auto-sync tab to copy on initial load if copy mode is active
+  const initialTabSynced = useRef(false);
   useEffect(() => {
-    if (isCopyMode && activeTab === "strategy") setActiveTab("copy");
-  }, [isCopyMode, activeTab]);
+    if (isCopyMode && !initialTabSynced.current) {
+      initialTabSynced.current = true;
+      setActiveTab("copy");
+    }
+  }, [isCopyMode]);
 
   // Build risk state: prefer on-chain account data, fall back to bot's internal state
   const botRiskState = (appState.data?.runtimeState?.risk_state as RiskState) ?? null;

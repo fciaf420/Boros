@@ -54,55 +54,59 @@ export default function Header({ state, markets, onOpenSettings, isCopyMode, cop
 
   return (
     <header className="relative flex items-center gap-5 px-5 py-6 border-b border-border shrink-0 overflow-hidden">
-      {/* Banner background */}
+      {/* Banner background — pointer-events-none so clicks reach buttons */}
       <div
-        className="absolute inset-0 bg-cover bg-center opacity-[0.55]"
+        className="absolute inset-0 bg-cover bg-center opacity-[0.55] pointer-events-none"
         style={{ backgroundImage: "url(/banner.jpg)" }}
       />
-      <div className="absolute inset-0 bg-gradient-to-r from-background/60 via-transparent to-background/60" />
-      <div className="absolute inset-0 bg-gradient-to-b from-background/30 to-background/50" />
+      <div className="absolute inset-0 bg-gradient-to-r from-background/60 via-transparent to-background/60 pointer-events-none" />
+      <div className="absolute inset-0 bg-gradient-to-b from-background/30 to-background/50 pointer-events-none" />
 
       {/* Content */}
-      <div className="relative flex items-center gap-5 w-full" style={{ textShadow: "0 1px 4px rgba(0,0,0,0.7)" }}>
+      <div className="relative z-10 flex items-center gap-5 w-full" style={{ textShadow: "0 1px 4px rgba(0,0,0,0.7)" }}>
         <span className="text-lg font-bold tracking-[4px] text-coral drop-shadow-lg">BOROS</span>
 
-        <div className="flex items-center gap-0.5 bg-background/60 backdrop-blur-sm rounded p-0.5">
+        <div className="flex items-center gap-1 bg-background/60 backdrop-blur-sm rounded-md p-1">
           <button
+            type="button"
             onClick={() => onTabChange("strategy")}
-            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+            className={`px-3 py-1.5 text-xs font-semibold tracking-wide rounded cursor-pointer select-none transition-colors ${
               activeTab === "strategy"
                 ? "bg-coral/20 text-coral"
-                : "text-text-muted hover:text-text-secondary"
+                : "text-text-muted hover:text-text-secondary hover:bg-white/5"
             }`}
           >
             Strategy
           </button>
           <button
+            type="button"
             onClick={() => onTabChange("copy")}
-            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+            className={`px-3 py-1.5 text-xs font-semibold tracking-wide rounded cursor-pointer select-none transition-colors ${
               activeTab === "copy"
                 ? "bg-coral/20 text-coral"
-                : "text-text-muted hover:text-text-secondary"
+                : "text-text-muted hover:text-text-secondary hover:bg-white/5"
             }`}
           >
             Copy
           </button>
           <button
+            type="button"
             onClick={() => onTabChange("wallet")}
-            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+            className={`px-3 py-1.5 text-xs font-semibold tracking-wide rounded cursor-pointer select-none transition-colors ${
               activeTab === "wallet"
                 ? "bg-coral/20 text-coral"
-                : "text-text-muted hover:text-text-secondary"
+                : "text-text-muted hover:text-text-secondary hover:bg-white/5"
             }`}
           >
             Wallet
           </button>
           <button
+            type="button"
             onClick={() => onTabChange("agent")}
-            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+            className={`px-3 py-1.5 text-xs font-semibold tracking-wide rounded cursor-pointer select-none transition-colors ${
               activeTab === "agent"
                 ? "bg-coral/20 text-coral"
-                : "text-text-muted hover:text-text-secondary"
+                : "text-text-muted hover:text-text-secondary hover:bg-white/5"
             }`}
           >
             Agent
