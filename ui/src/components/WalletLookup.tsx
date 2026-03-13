@@ -308,10 +308,10 @@ function Leaderboard({ data, loading, period, onSelectWallet, onRefresh }: {
           )}
           <button
             onClick={onRefresh}
-            className="ml-2 text-coral hover:text-coral/80 transition-colors"
+            className="ml-2 px-2 py-0.5 bg-coral/20 text-coral text-[10px] font-semibold rounded hover:bg-coral/30 transition-colors disabled:opacity-50"
             disabled={data?.scanning}
           >
-            {data?.scanning ? "scanning..." : "scan"}
+            {data?.scanning ? "scanning..." : "Rescan"}
           </button>
         </span>
       </CardHeader>
