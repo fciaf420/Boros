@@ -1,15 +1,34 @@
-import type { CopyTargetRow, TargetPositionSnapshot } from "../types";
-import { fmtApr, fmtTime } from "../utils/format";
+import { usePolling } from "../hooks/usePolling";
+import type { MarketsResponse } from "../types";
+import { fmtApr } from "../utils/format";
 import Panel from "./Panel";
 import { Badge } from "./ui/badge";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "./ui/table";
 
+interface TargetPosition {
+  marketId: number;
+  tokenId: number;
+  side: string;
+  sizeBase: number;
+  notionalUsd: number;
+  fixedApr: number;
+  markApr: number;
+  liquidationApr: number | null;
+  initialMarginUsd: number;
+  marginType: string;
+  unrealizedPnl: number;
+  allTimePnl: number;
+  settledPct: number;
+}
+
+interface TargetPositionsResponse {
+  positions: TargetPosition[];
+  targetAddress?: string;
+  error?: string;
+}
+
 interface TargetTrackerProps {
-  targets: CopyTargetRow[] | null;
-  loading: boolean;
-  lastUpdated: number | null;
-  error: string | null;
-  stale: boolean;
+  markets: MarketsResponse | null;
 }
 
 function truncateAddress(addr: string): string {
@@ -17,54 +36,76 @@ function truncateAddress(addr: string): string {
   return addr.slice(0, 6) + "..." + addr.slice(-4);
 }
 
-export default function TargetTracker({ targets, loading, error, stale }: TargetTrackerProps) {
-  const target = targets?.[0] ?? null;
+function fmtUsd(value: number): string {
+  const abs = Math.abs(value);
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}$${abs.toFixed(2)}`;
+}
 
-  let snapshots: TargetPositionSnapshot[] = [];
-  if (target) {
-    try {
-      snapshots = JSON.parse(target.snapshot_json) as TargetPositionSnapshot[];
-    } catch {
-      snapshots = [];
+function getMarketName(marketId: number, markets: MarketsResponse | null): string {
+  if (!markets?.results) return `#${marketId}`;
+  for (const m of markets.results) {
+    if (m.marketId === marketId) {
+      const name = m.imData?.name ?? m.metadata?.platformName;
+      return name ? String(name) : `#${marketId}`;
     }
   }
+  return `#${marketId}`;
+}
 
-  const address = target ? truncateAddress(target.target_address) : "--";
-  const updated = target ? fmtTime(target.recorded_at) : "--";
+export default function TargetTracker({ markets }: TargetTrackerProps) {
+  const { data, loading, error, stale } = usePolling<TargetPositionsResponse>("/api/copy-targets/positions", 10_000);
+
+  const positions = data?.positions ?? [];
+  const address = data?.targetAddress ? truncateAddress(data.targetAddress) : "--";
+  const totalPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+  const totalNotional = positions.reduce((sum, p) => sum + p.notionalUsd, 0);
+  const profitable = positions.filter(p => p.unrealizedPnl > 0).length;
 
   return (
     <Panel
       title="Target Tracker"
-      meta={`${snapshots.length} positions | ${address} | ${updated}`}
+      meta={`${positions.length} pos (${profitable} green) | ${address} | PnL: ${fmtUsd(totalPnl)}`}
       loading={loading}
-      empty={snapshots.length === 0}
-      emptyText="No target data"
+      empty={positions.length === 0}
+      emptyText="No target positions"
       emptyHint="Target address not configured or target has no open positions"
-      error={error}
+      error={data?.error ?? error}
       stale={stale}
     >
+      <div className="flex items-center gap-3 px-2 py-1 border-b border-border text-[10px] text-text-muted">
+        <span>Notional: <span className="text-text-secondary font-mono">${totalNotional.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span></span>
+        <span>Unrealized: <span className={`font-mono font-semibold ${totalPnl >= 0 ? "text-green" : "text-red"}`}>{fmtUsd(totalPnl)}</span></span>
+      </div>
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
-            <TableHead>Market ID</TableHead>
+            <TableHead>Market</TableHead>
             <TableHead>Side</TableHead>
-            <TableHead>Size</TableHead>
-            <TableHead>Entry APR</TableHead>
-            <TableHead>Current APR</TableHead>
+            <TableHead>Notional</TableHead>
+            <TableHead>Entry</TableHead>
+            <TableHead>Mark</TableHead>
+            <TableHead>PnL (USD)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {snapshots.map((s) => (
-            <TableRow key={`${s.marketId}-${s.side}`}>
-              <TableCell className="text-coral font-semibold">{s.marketId}</TableCell>
-              <TableCell>
-                <Badge variant={s.side.toLowerCase() === "long" ? "long" : "short"}>{s.side}</Badge>
-              </TableCell>
-              <TableCell className="text-xs font-mono">{s.sizeBase.toFixed(4)}</TableCell>
-              <TableCell className="text-xs font-mono">{fmtApr(s.entryApr)}</TableCell>
-              <TableCell className="text-xs font-mono">{fmtApr(s.currentApr)}</TableCell>
-            </TableRow>
-          ))}
+          {positions.map((p) => {
+            const pnlColor = p.unrealizedPnl > 0 ? "text-green" : p.unrealizedPnl < 0 ? "text-red" : "text-text-muted";
+            return (
+              <TableRow key={`${p.marketId}-${p.side}`}>
+                <TableCell className="text-coral font-semibold text-xs">{getMarketName(p.marketId, markets)}</TableCell>
+                <TableCell>
+                  <Badge variant={p.side.toLowerCase() === "long" ? "long" : "short"}>{p.side}</Badge>
+                </TableCell>
+                <TableCell className="text-xs font-mono">${p.notionalUsd.toFixed(0)}</TableCell>
+                <TableCell className="text-xs font-mono">{fmtApr(p.fixedApr)}</TableCell>
+                <TableCell className="text-xs font-mono">{fmtApr(p.markApr)}</TableCell>
+                <TableCell className={`text-xs font-mono font-semibold ${pnlColor}`}>
+                  {fmtUsd(p.unrealizedPnl)}
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </Panel>

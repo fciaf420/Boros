@@ -268,11 +268,7 @@ export default function App() {
               stale={copyTrades.stale}
             />
             <TargetTracker
-              targets={copyTargets.data}
-              loading={copyTargets.loading}
-              lastUpdated={copyTargets.lastUpdated}
-              error={copyTargets.error}
-              stale={copyTargets.stale}
+              markets={markets.data}
             />
           </div>
         ) : activeTab === "wallet" ? (

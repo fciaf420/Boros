@@ -699,10 +699,7 @@ async function runLeaderboardScan(): Promise<void> {
 }
 
 app.get("/api/leaderboard", (_req, res) => {
-  // Trigger scan if stale
-  if (!leaderboardCache.scanning && Date.now() - leaderboardCache.updatedAt > LEADERBOARD_MAX_AGE_MS) {
-    runLeaderboardScan().catch(console.error);
-  }
+  // Serve cached data only — scan is manual via POST /api/leaderboard/refresh
   res.json(leaderboardCache);
 });
 
@@ -714,11 +711,8 @@ app.post("/api/leaderboard/refresh", (_req, res) => {
   res.json({ status: "scan_started" });
 });
 
-// Load cache on startup, trigger scan if stale
+// Load cache on startup (no auto-scan — use Rescan button in UI)
 loadLeaderboardCache();
-if (Date.now() - leaderboardCache.updatedAt > LEADERBOARD_MAX_AGE_MS) {
-  setTimeout(() => runLeaderboardScan().catch(console.error), 5000);
-}
 
 // ---------- SQLite endpoints ----------
 
@@ -794,10 +788,30 @@ app.get("/api/copy-targets", (_req, res) => {
   const store = getDb();
   if (!store) return res.json([]);
   try {
-    const rows = store.prepare("SELECT * FROM copy_target_snapshots ORDER BY recorded_at DESC LIMIT 1").all();
+    const rows = store.prepare("SELECT id, recorded_at, target_address, positions_json AS snapshot_json FROM copy_target_snapshots ORDER BY recorded_at DESC LIMIT 1").all();
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  }
+});
+
+// Target positions with real USD PnL from Boros API
+app.get("/api/copy-targets/positions", async (_req, res) => {
+  const targetAddress = process.env.BOROS_COPY_TRADE_TARGET_ADDRESS;
+  const targetAccountId = process.env.BOROS_COPY_TRADE_TARGET_ACCOUNT_ID ?? "0";
+  if (!targetAddress) {
+    return res.json({ positions: [], error: "No target address configured" });
+  }
+  try {
+    const [rawResp, prices] = await Promise.all([
+      borosFetch(`/v1/collaterals/summary?userAddress=${targetAddress}&accountId=${targetAccountId}`),
+      getTokenPrices(),
+    ]);
+    const raw = rawResp as { collaterals?: Array<Record<string, unknown>> };
+    const positions = extractPositions(raw.collaterals ?? [], prices);
+    res.json({ positions, targetAddress, accountId: targetAccountId });
+  } catch (err) {
+    res.status(500).json({ positions: [], error: String(err) });
   }
 });
 
