@@ -486,12 +486,20 @@ export default function WalletLookup({ markets }: WalletLookupProps) {
               Lookup
             </button>
             {submittedAddr && (
-              <button
-                onClick={handleRefresh}
-                className="px-2 py-1.5 text-text-muted hover:text-coral text-[11px] transition-colors"
-              >
-                Refresh
-              </button>
+              <>
+                <button
+                  onClick={handleRefresh}
+                  className="px-2 py-1.5 text-text-muted hover:text-coral text-[11px] transition-colors"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={() => { setSubmittedAddr(null); setData(null); setError(null); setAddress(""); }}
+                  className="px-2 py-1.5 text-text-muted hover:text-coral text-[11px] transition-colors"
+                >
+                  Back
+                </button>
+              </>
             )}
           </div>
         </CardContent>
