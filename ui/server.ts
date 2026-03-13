@@ -375,7 +375,7 @@ app.get("/api/wallet/:address", async (req, res) => {
       const totalOrders = orders.length;
       const filledOrders = orders.filter(o => o.status === 2).length;
       const fillRate = totalOrders > 0 ? filledOrders / totalOrders : 0;
-      const days = new Set(orders.map(o => new Date(o.placedTimestamp * 1000).toISOString().slice(0, 10)));
+      const days = new Set(orders.filter(o => o.placedTimestamp > 0).map(o => new Date(o.placedTimestamp * 1000).toISOString().slice(0, 10)));
       const mktCounts = new Map<number, number>();
       for (const o of orders) { mktCounts.set(o.marketId, (mktCounts.get(o.marketId) ?? 0) + 1); }
       const marketBreakdown = [...mktCounts.entries()]
