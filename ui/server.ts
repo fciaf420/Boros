@@ -318,6 +318,9 @@ app.get("/api/wallet/:address", async (req, res) => {
     }
 
     // --- Equity curve + performance ---
+    // The equity curve from the balance-chart API includes deposits/withdrawals,
+    // so we compute deposit-adjusted returns by detecting large jumps (>20% in one
+    // data point) and treating those as external cash flows, not trading PnL.
     let equityCurve: Array<{ timestamp: number; equity: number }> = [];
     let performance: Record<string, unknown> | null = null;
     if (chartR.status === "fulfilled") {
@@ -330,18 +333,36 @@ app.get("/api/wallet/:address", async (req, res) => {
       }
       equityCurve = [...byTs.entries()].map(([t, eq]) => ({ timestamp: t, equity: eq })).sort((a, b) => a.timestamp - b.timestamp);
       if (equityCurve.length >= 2) {
-        const first = equityCurve[0];
-        const last = equityCurve[equityCurve.length - 1];
-        const totalReturnPct = first.equity > 0 ? (last.equity - first.equity) / first.equity : 0;
-        const periodDays = Math.max(1, (last.timestamp - first.timestamp) / 86400);
-        const annualizedReturnPct = totalReturnPct / periodDays * 365;
-        let peak = first.equity;
+        // Compute deposit-adjusted cumulative return using modified Dietz method:
+        // For each interval, if the equity change is >20% of previous equity in a
+        // single step, treat the excess as a deposit/withdrawal (not trading PnL).
+        const JUMP_THRESHOLD = 0.20; // 20% single-step jump = likely deposit/withdrawal
+        let cumulativeReturn = 1.0; // starts at 1x
+        let peak = 1.0;
         let maxDrawdownPct = 0;
-        for (const pt of equityCurve) {
-          if (pt.equity > peak) peak = pt.equity;
-          const dd = peak > 0 ? (peak - pt.equity) / peak : 0;
+
+        for (let i = 1; i < equityCurve.length; i++) {
+          const prev = equityCurve[i - 1].equity;
+          const curr = equityCurve[i].equity;
+          if (prev <= 0) continue;
+
+          const rawChange = (curr - prev) / prev;
+          // If the jump exceeds threshold, clamp the return to 0 for this step
+          // (it's a deposit/withdrawal, not a trade)
+          const tradingReturn = Math.abs(rawChange) > JUMP_THRESHOLD ? 0 : rawChange;
+          cumulativeReturn *= (1 + tradingReturn);
+
+          // Max drawdown on the adjusted curve
+          if (cumulativeReturn > peak) peak = cumulativeReturn;
+          const dd = peak > 0 ? (peak - cumulativeReturn) / peak : 0;
           if (dd > maxDrawdownPct) maxDrawdownPct = dd;
         }
+
+        const totalReturnPct = cumulativeReturn - 1;
+        const first = equityCurve[0];
+        const last = equityCurve[equityCurve.length - 1];
+        const periodDays = Math.max(1, (last.timestamp - first.timestamp) / 86400);
+        const annualizedReturnPct = totalReturnPct / periodDays * 365;
         performance = { totalReturnPct, annualizedReturnPct, maxDrawdownPct, periodDays: Math.round(periodDays) };
       }
     }
@@ -376,7 +397,8 @@ app.get("/api/wallet/:address", async (req, res) => {
 
     res.json({ address, account, positions, equityCurve, performance, tradingActivity, referral });
   } catch (err) {
-    res.status(502).json({ error: String(err) });
+    console.error(`[wallet] lookup failed for ${req.params.address}:`, err);
+    res.status(502).json({ error: `Wallet lookup failed: ${err instanceof Error ? err.message : String(err)}` });
   }
 });
 
@@ -531,22 +553,42 @@ async function fetchWalletPerformance(address: string, prices: Map<number, numbe
         const last = curve[curve.length - 1];
         equity = last.eq;
 
+        // Deposit-adjusted returns: skip intervals where equity jumps >20% in one step
+        const JUMP = 0.20;
+
+        // Helper: compute cumulative return over a slice of the curve
+        const adjReturn = (slice: typeof curve): number => {
+          let cum = 1.0;
+          for (let i = 1; i < slice.length; i++) {
+            const prev = slice[i - 1].eq;
+            if (prev <= 0) continue;
+            const chg = (slice[i].eq - prev) / prev;
+            if (Math.abs(chg) <= JUMP) cum *= (1 + chg);
+          }
+          return cum - 1;
+        };
+
         // 30d return
         const cutoff30 = last.t - 30 * 86400;
-        const ref30 = curve.find(p => p.t >= cutoff30);
-        if (ref30 && ref30.eq > 0) return30d = (last.eq - ref30.eq) / ref30.eq;
+        const slice30 = curve.filter(p => p.t >= cutoff30);
+        if (slice30.length >= 2) return30d = adjReturn(slice30);
 
         // 7d return
         const cutoff7 = last.t - 7 * 86400;
-        const ref7 = curve.find(p => p.t >= cutoff7);
-        if (ref7 && ref7.eq > 0) return7d = (last.eq - ref7.eq) / ref7.eq;
+        const slice7 = curve.filter(p => p.t >= cutoff7);
+        if (slice7.length >= 2) return7d = adjReturn(slice7);
 
-        // Max drawdown (over full curve)
-        let peak = curve[0].eq;
+        // Max drawdown (deposit-adjusted)
+        let peak = 1.0;
         let dd = 0;
-        for (const p of curve) {
-          if (p.eq > peak) peak = p.eq;
-          const d = peak > 0 ? (peak - p.eq) / peak : 0;
+        let cum = 1.0;
+        for (let i = 1; i < curve.length; i++) {
+          const prev = curve[i - 1].eq;
+          if (prev <= 0) continue;
+          const chg = (curve[i].eq - prev) / prev;
+          if (Math.abs(chg) <= JUMP) cum *= (1 + chg);
+          if (cum > peak) peak = cum;
+          const d = peak > 0 ? (peak - cum) / peak : 0;
           if (d > dd) dd = d;
         }
         maxDrawdown = dd;
