@@ -23,6 +23,7 @@ export interface Broker {
   syncPositions(positions: OpenPosition[]): Promise<BrokerPositionSync>;
   cancel(order: ExecutionRecord, reason: string): Promise<ExecutionRecord>;
   sweepIsolatedCash(markets: Array<{ marketId: number; tokenId: number }>): Promise<string[]>;
+  transferCollateral(marketId: number, tokenId: number, amountUsd: number, isDeposit: boolean): Promise<string>;
 }
 
 type ContractOpenOrder = {
@@ -180,6 +181,10 @@ export class PaperBroker implements Broker {
 
   public async sweepIsolatedCash(): Promise<string[]> {
     return [];
+  }
+
+  public async transferCollateral(_marketId: number, _tokenId: number, amountUsd: number, isDeposit: boolean): Promise<string> {
+    return `[paper] ${isDeposit ? "deposited" : "withdrew"} $${amountUsd.toFixed(2)} collateral`;
   }
 }
 
@@ -612,5 +617,52 @@ export class LiveBroker implements Broker {
     }
 
     return notes;
+  }
+
+  public async transferCollateral(marketId: number, tokenId: number, amountUsd: number, isDeposit: boolean): Promise<string> {
+    if (amountUsd > this.config.maxCollateralTransferUsd) {
+      throw new Error(`Collateral transfer $${amountUsd.toFixed(2)} exceeds max $${this.config.maxCollateralTransferUsd}`);
+    }
+
+    if (this.config.accountId === undefined) {
+      throw new Error("Live mode requires BOROS_ACCOUNT_ID for collateral transfers");
+    }
+
+    const exchange = await this.getExchange();
+    await this.ensureAgent(exchange);
+
+    if (isDeposit) {
+      if (!this.enteredIsolatedMarkets.has(marketId)) {
+        await exchange.enterMarkets(false, [marketId]);
+        this.enteredIsolatedMarkets.add(marketId);
+      }
+    }
+
+    const rootAddress = this.getRootAddress();
+    const subaccount = this.getSubaccount();
+
+    if (isDeposit) {
+      const transferAmount = BigInt(Math.ceil(amountUsd * 1e18));
+      await exchange.cashTransfer({
+        marketId,
+        isDeposit: true,
+        amount: transferAmount,
+      });
+      return `deposited $${amountUsd.toFixed(2)} collateral to isolated market ${marketId}`;
+    } else {
+      const cash = await subaccount.getMarketAccCash(rootAddress, this.config.accountId, tokenId, marketId);
+      if (cash <= 0n) {
+        return `no collateral to withdraw from isolated market ${marketId}`;
+      }
+      const withdrawAmount = amountUsd > 0
+        ? BigInt(Math.min(Number(cash), Math.ceil(amountUsd * 1e18)))
+        : cash;
+      await exchange.cashTransfer({
+        marketId,
+        isDeposit: false,
+        amount: withdrawAmount,
+      });
+      return `withdrew ${fromBase18(withdrawAmount).toFixed(4)} collateral from isolated market ${marketId}`;
+    }
   }
 }

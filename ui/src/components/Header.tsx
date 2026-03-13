@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import type { AppState, MarketsResponse } from "../types";
+import type { AppState, AppTab, MarketsResponse } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Settings } from "lucide-react";
@@ -10,8 +10,8 @@ interface HeaderProps {
   onOpenSettings: () => void;
   isCopyMode: boolean;
   copyPositionCount: number;
-  activeTab: "strategy" | "copy" | "wallet";
-  onTabChange: (tab: "strategy" | "copy" | "wallet") => void;
+  activeTab: AppTab;
+  onTabChange: (tab: AppTab) => void;
   lastRefresh: number | null;
   equityUsd: number | null;
 }
@@ -96,6 +96,16 @@ export default function Header({ state, markets, onOpenSettings, isCopyMode, cop
             }`}
           >
             Wallet
+          </button>
+          <button
+            onClick={() => onTabChange("agent")}
+            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+              activeTab === "agent"
+                ? "bg-coral/20 text-coral"
+                : "text-text-muted hover:text-text-secondary"
+            }`}
+          >
+            Agent
           </button>
         </div>
 

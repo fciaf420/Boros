@@ -15,9 +15,20 @@ export class CopyExecutor {
     return scaled;
   }
 
+  /**
+   * Build a TradeCandidate from a target position delta.
+   *
+   * @param delta           The detected change in the target's position.
+   * @param market          Current market summary (prices, APRs, order book top).
+   * @param existingNotionalUsd  The notional USD already held in this position by the
+   *                             copier. For INCREASE (ADD) deltas the caller should pass
+   *                             the current position's notionalUsd so the cap is enforced
+   *                             cumulatively, not per-delta. Defaults to 0.
+   */
   async buildCopyCandidate(
     delta: TargetPositionDelta,
     market: MarketSummary,
+    existingNotionalUsd: number = 0,
   ): Promise<TradeCandidate> {
     // Map DeltaAction to ActionType
     const action = delta.action === "ENTER" ? "ENTER"
@@ -25,13 +36,23 @@ export class CopyExecutor {
       : delta.action === "INCREASE" ? "ADD"
       : "EXIT"; // DECREASE maps to EXIT (partial)
 
+    const isExit = delta.action === "EXIT" || delta.action === "DECREASE";
+
     // For ENTER/INCREASE we use the delta's sizeChangeBase; for EXIT/DECREASE we also use sizeChangeBase
     let sizeBase = this.computeCopySize(delta.sizeChangeBase);
 
-    // Apply notional cap
+    // Apply cumulative notional cap.
+    // existingNotionalUsd represents the notional already allocated to this
+    // position so that multiple INCREASE deltas cannot exceed maxNotionalUsd.
+    const remainingNotional = Math.max(0, this.config.maxNotionalUsd - existingNotionalUsd);
+    if (remainingNotional <= 0 && !isExit) {
+      throw new Error(
+        `Position notional already at cap ($${existingNotionalUsd.toFixed(2)} >= $${this.config.maxNotionalUsd}); skipping INCREASE`,
+      );
+    }
     const notionalUsd = sizeBase * market.assetMarkPrice;
-    if (notionalUsd > this.config.maxNotionalUsd) {
-      sizeBase = this.config.maxNotionalUsd / market.assetMarkPrice;
+    if (!isExit && notionalUsd > remainingNotional) {
+      sizeBase = remainingNotional / market.assetMarkPrice;
     }
 
     // Liquidity check: fetch order book and cap size by available liquidity
@@ -81,8 +102,14 @@ export class CopyExecutor {
       orderTick = orderBook.bestLongTick;
     }
 
-    // Check slippage vs target's entry APR
-    const slippage = Math.abs(orderApr - delta.targetEntryApr);
+    // For ENTER/INCREASE, slippage is measured against the target's entry APR
+    // (we want to open near the same price the target did).
+    // For EXIT/DECREASE, the target's entry APR is stale -- slippage should be
+    // measured against the current market mid APR so we evaluate execution
+    // quality relative to where the market actually is right now.
+    const referenceApr = isExit ? market.midApr : delta.targetEntryApr;
+
+    const slippage = Math.abs(orderApr - referenceApr);
     if (slippage > this.config.maxSlippage) {
       // Still build the candidate but note it in rationale - caller decides to skip
     }
@@ -101,7 +128,7 @@ export class CopyExecutor {
       ` | target size change: ${delta.sizeChangeBase.toFixed(4)}` +
       ` | our size: ${sizeBase.toFixed(4)}` +
       ` | ratio: ${this.config.sizeRatio}` +
-      (slippage > this.config.maxSlippage ? ` | WARNING: slippage ${(slippage * 100).toFixed(2)}% exceeds max` : "");
+      (slippage > this.config.maxSlippage ? ` | WARNING: slippage ${(slippage * 100).toFixed(2)}% exceeds max (ref=${referenceApr.toFixed(4)})` : "");
 
     return {
       marketId: market.marketId,
@@ -112,7 +139,7 @@ export class CopyExecutor {
       orderIntent,
       edgeBps: 0, // Copy trades don't have edge-based logic
       netEdgeBps: 0,
-      targetApr: delta.targetEntryApr,
+      targetApr: referenceApr,
       orderTick,
       orderApr,
       sizeBase,
@@ -124,7 +151,19 @@ export class CopyExecutor {
     };
   }
 
-  isWithinSlippage(delta: TargetPositionDelta, orderApr: number): boolean {
-    return Math.abs(orderApr - delta.targetEntryApr) <= this.config.maxSlippage;
+  /**
+   * Check whether the order APR is within the allowed slippage of the reference APR.
+   *
+   * For ENTER/INCREASE the reference is the target's entry APR (we want to
+   * match their entry price). For EXIT/DECREASE the reference should be the
+   * current market mid APR since the original entry APR is no longer relevant.
+   *
+   * @param marketMidApr  Current market mid APR -- used as the reference for
+   *                      EXIT/DECREASE actions.
+   */
+  isWithinSlippage(delta: TargetPositionDelta, orderApr: number, marketMidApr?: number): boolean {
+    const isExit = delta.action === "EXIT" || delta.action === "DECREASE";
+    const referenceApr = isExit && marketMidApr !== undefined ? marketMidApr : delta.targetEntryApr;
+    return Math.abs(orderApr - referenceApr) <= this.config.maxSlippage;
   }
 }

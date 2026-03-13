@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import type { CopyPosition, CopyTradeRecord, ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TargetPositionSnapshot, TradeCandidate } from "./types.js";
+import type { AgentCollateralIntent, AgentExecutionIntent, CopyPosition, CopyTradeRecord, ExecutionRecord, FairValueEstimate, MarketSnapshot, OpenPosition, RiskState, TargetPositionSnapshot, TradeCandidate } from "./types.js";
 
 function safeJsonStringify(value: unknown): string {
   return JSON.stringify(value, (_key, innerValue) =>
@@ -127,6 +127,35 @@ export class RuntimeStore {
       CREATE TABLE IF NOT EXISTS runtime_state (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_execution_intents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at INTEGER NOT NULL,
+        market_id INTEGER NOT NULL,
+        market_name TEXT,
+        side TEXT,
+        action TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        thesis TEXT NOT NULL,
+        source TEXT NOT NULL,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        status_reason TEXT,
+        applied_at INTEGER,
+        raw_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_collateral_intents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        market_id INTEGER,
+        amount_usd REAL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        status_reason TEXT,
+        applied_at INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS copy_target_snapshots (
@@ -586,6 +615,94 @@ export class RuntimeStore {
     this.setRuntimeValue("risk_state", state);
   }
 
+  public replacePendingAgentIntents(intents: Array<Omit<AgentExecutionIntent, "id" | "recordedAt" | "status" | "statusReason" | "appliedAt">>): void {
+    const now = Math.floor(Date.now() / 1000);
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE agent_execution_intents
+        SET status = 'EXPIRED', status_reason = 'Superseded by newer ACP decision', applied_at = ?
+        WHERE status = 'PENDING'
+      `).run(now);
+      const insert = this.db.prepare(`
+        INSERT INTO agent_execution_intents (
+          recorded_at, market_id, market_name, side, action, confidence, thesis, source, expires_at, status, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+      `);
+      for (const intent of intents) {
+        const recordedAt = Math.floor(Date.now() / 1000);
+        insert.run(
+          recordedAt,
+          intent.marketId,
+          intent.marketName ?? null,
+          intent.side ?? null,
+          intent.action,
+          intent.confidence,
+          intent.thesis,
+          intent.source,
+          intent.expiresAt ?? null,
+          safeJsonStringify(intent),
+        );
+      }
+    });
+    tx();
+  }
+
+  public getPendingAgentIntents(): AgentExecutionIntent[] {
+    return this.db.prepare(`
+      SELECT
+        id,
+        recorded_at as recordedAt,
+        market_id as marketId,
+        market_name as marketName,
+        side,
+        action,
+        confidence,
+        thesis,
+        source,
+        expires_at as expiresAt,
+        status,
+        status_reason as statusReason,
+        applied_at as appliedAt
+      FROM agent_execution_intents
+      WHERE status = 'PENDING'
+      ORDER BY confidence DESC, recorded_at ASC
+    `).all() as AgentExecutionIntent[];
+  }
+
+  public resolveAgentIntent(id: number, status: "APPLIED" | "REJECTED" | "EXPIRED", reason?: string): void {
+    this.db.prepare(`
+      UPDATE agent_execution_intents
+      SET status = ?, status_reason = ?, applied_at = ?
+      WHERE id = ?
+    `).run(status, reason ?? null, Math.floor(Date.now() / 1000), id);
+  }
+
+  public getPendingCollateralIntents(): AgentCollateralIntent[] {
+    return this.db.prepare(`
+      SELECT
+        id,
+        recorded_at as recordedAt,
+        action,
+        market_id as marketId,
+        amount_usd as amountUsd,
+        reason,
+        status,
+        status_reason as statusReason,
+        applied_at as appliedAt
+      FROM agent_collateral_intents
+      WHERE status = 'PENDING'
+      ORDER BY recorded_at ASC
+    `).all() as AgentCollateralIntent[];
+  }
+
+  public resolveCollateralIntent(id: number, status: "APPLIED" | "REJECTED" | "FAILED", reason?: string): void {
+    this.db.prepare(`
+      UPDATE agent_collateral_intents
+      SET status = ?, status_reason = ?, applied_at = ?
+      WHERE id = ?
+    `).run(status, reason ?? null, Math.floor(Date.now() / 1000), id);
+  }
+
   public getLatestTargetSnapshot(targetAddress: string): TargetPositionSnapshot[] {
     const row = this.db.prepare(`
       SELECT positions_json FROM copy_target_snapshots
@@ -688,5 +805,22 @@ export class RuntimeStore {
     this.db.prepare(`
       UPDATE copy_positions SET status = 'CLOSED', closed_at = ? WHERE id = ?
     `).run(Math.floor(Date.now() / 1000), id);
+  }
+
+  public reduceCopyPosition(id: string, newSizeBase: number, newSizeBase18: string, newNotionalUsd: number, newMarginUsd: number): void {
+    this.db.prepare(`
+      UPDATE copy_positions
+      SET size_base = ?, size_base18 = ?, notional_usd = ?, margin_usd = ?
+      WHERE id = ? AND status = 'OPEN'
+    `).run(newSizeBase, newSizeBase18, newNotionalUsd, newMarginUsd, id);
+  }
+
+  public getCopyFailureStreak(): number {
+    const val = this.getRuntimeValue<number>("copy_failure_streak");
+    return val ?? 0;
+  }
+
+  public setCopyFailureStreak(count: number): void {
+    this.setRuntimeValue("copy_failure_streak", count);
   }
 }

@@ -1,3 +1,5 @@
+export type AppTab = "strategy" | "copy" | "wallet" | "agent";
+
 export interface MarketSummary {
   marketId: number;
   tokenId: number;
@@ -299,4 +301,120 @@ export interface LeaderboardResponse {
   entries: LeaderboardEntry[];
   walletCount: number;
   error?: string;
+}
+
+export interface AgentConfig {
+  mode: "paper" | "live";
+  acpEnabled: boolean;
+  openWebResearch: boolean;
+  strategyPack: "relative_value" | "settlement_sniper" | "negative_funding" | "cross_market";
+  enabledStrategies: string[];
+  marketAllowlist: string;
+  marketBlocklist: string;
+  maxPositions: number;
+  maxInitialMarginPctPerMarket: number;
+  maxTotalMarginPct: number;
+  maxDailyDrawdownPct: number;
+  leverageCap: number;
+  marginUtilizationTargetPct: number;
+  confidenceThreshold: number;
+  allowEntries: boolean;
+  allowAdds: boolean;
+  allowReductions: boolean;
+  allowCloses: boolean;
+  allowCollateralOps: boolean;
+  maxCollateralTransferUsd: number;
+  takeProfitPct: number;
+  stopLossPct: number;
+  trailingStopArmPct: number;
+  trailingStopGivebackPct: number;
+  pollingIntervalMs: number;
+  closeOnly: boolean;
+}
+
+export interface AgentStatus {
+  runtimeState: "not_configured" | "ready" | "running" | "paused" | "stopped" | "error" | "kill_switched";
+  deployed: boolean;
+  closeOnly: boolean;
+  mode: "paper" | "live";
+  acp: {
+    installed: boolean;
+    authenticated: boolean;
+    message: string;
+    authMode?: string;
+    lastCheckedAt?: number;
+    deviceAuth?: {
+      active: boolean;
+      verificationUri?: string;
+      code?: string;
+      startedAt?: number;
+      message?: string;
+    };
+  };
+  process: {
+    pid?: number;
+    startedAt?: number;
+    lastHeartbeat?: number;
+    lastExitCode?: number;
+  };
+  claudeFallback?: boolean;
+  lastError?: string;
+  updatedAt: number;
+}
+
+export interface AgentSecretsStatus {
+  configured: boolean;
+  source: "secure-store" | "environment" | "mixed" | "none";
+  hasRpcUrl: boolean;
+  hasAccountId: boolean;
+  hasRootAddress: boolean;
+  hasPrivateKey: boolean;
+  rpcUrlPreview?: string;
+  accountId?: string;
+  rootAddressMasked?: string;
+  updatedAt?: number;
+  message: string;
+  missing: string[];
+}
+
+export interface AgentResearchNote {
+  id: number;
+  recordedAt: number;
+  title: string;
+  summary: string;
+  metadataJson?: string;
+}
+
+export interface AgentRecommendation {
+  id: number;
+  recordedAt: number;
+  marketId?: number;
+  marketName?: string;
+  strategyId: string;
+  side?: string;
+  action: string;
+  confidence: number;
+  status: string;
+  thesis: string;
+  evidenceJson?: string;
+}
+
+export interface AgentActionIntent {
+  id: number;
+  recordedAt: number;
+  type: string;
+  marketId?: number;
+  marketName?: string;
+  status: string;
+  summary: string;
+  detailsJson?: string;
+}
+
+export interface AgentAuditEvent {
+  id: number;
+  recordedAt: number;
+  level: "info" | "warn" | "error";
+  category: string;
+  message: string;
+  detailsJson?: string;
 }

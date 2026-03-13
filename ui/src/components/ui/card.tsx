@@ -5,7 +5,7 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       className={cn(
-        "bg-surface border border-border flex flex-col overflow-hidden",
+        "bg-surface border border-border flex flex-col overflow-hidden min-w-0",
         className
       )}
       {...props}

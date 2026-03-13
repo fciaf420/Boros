@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import Database from "better-sqlite3";
+import { registerAgentRoutes } from "./agentRuntime.js";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 loadEnv({ path: path.join(ROOT, ".env") });
@@ -17,6 +18,7 @@ const BOROS_API = process.env.BOROS_API_BASE_URL ?? "https://api.boros.finance/c
 const SQLITE_PATH = process.env.BOROS_SQLITE_PATH
   ? path.resolve(ROOT, process.env.BOROS_SQLITE_PATH)
   : path.join(ROOT, "data", "boros_trader.sqlite");
+const agentController = registerAgentRoutes({ app, rootDir: ROOT, traderSqlitePath: SQLITE_PATH });
 
 // ---------- SQLite (read-only) ----------
 
@@ -404,7 +406,9 @@ app.get("/api/wallet/:address", async (req, res) => {
       };
     }
 
-    res.json({ address, account, positions, equityCurve, performance, tradingActivity, referral });
+    const payload = { address, account, positions, equityCurve, performance, tradingActivity, referral };
+    agentController.recordWalletResearch(address, payload);
+    res.json(payload);
   } catch (err) {
     console.error(`[wallet] lookup failed for ${req.params.address}:`, err);
     res.status(502).json({ error: `Wallet lookup failed: ${err instanceof Error ? err.message : String(err)}` });
@@ -964,4 +968,14 @@ server.on("error", (err: NodeJS.ErrnoException) => {
     console.error(`[boros-ui] Server error: ${err.message}`);
   }
   process.exit(1);
+});
+
+process.on("SIGINT", () => {
+  agentController.dispose();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  agentController.dispose();
+  process.exit(0);
 });

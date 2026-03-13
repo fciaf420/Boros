@@ -15,15 +15,18 @@ export class TargetWatcher {
   private previousSnapshot: Map<number, TargetPositionSnapshot> = new Map();
   private resolvedAccountId: number;
   private readonly deadzone: number;
+  private readonly maxScanId: number;
 
   constructor(
     private readonly targetAddress: string,
     initialAccountId: number,
     private readonly api: BorosApiClient,
     deadzone = 0.001,
+    maxScanId = 49,
   ) {
     this.resolvedAccountId = initialAccountId;
     this.deadzone = deadzone;
+    this.maxScanId = maxScanId;
   }
 
   hydrateFromSnapshot(positions: TargetPositionSnapshot[]): void {
@@ -151,9 +154,10 @@ export class TargetWatcher {
     return { positions, deltas };
   }
 
-  async discoverAccountIds(): Promise<number[]> {
+  async discoverAccountIds(maxId?: number): Promise<number[]> {
+    const upperBound = maxId ?? this.maxScanId;
     const activeIds: number[] = [];
-    for (let id = 0; id <= 9; id++) {
+    for (let id = 0; id <= upperBound; id++) {
       try {
         const positions = await this.api.fetchActivePositions(this.targetAddress, id);
         const hasActive = positions.some((pos) => {
@@ -163,11 +167,22 @@ export class TargetWatcher {
 
         if (hasActive) {
           activeIds.push(id);
+          // Stop early: the first account with active positions is typically
+          // the one in use, and scanning further IDs is unnecessary overhead
+          break;
         }
       } catch {
         // Skip accounts that error
       }
     }
+
+    if (activeIds.length === 0) {
+      console.warn(
+        `[target-watcher] no active positions found for ${this.targetAddress} across account IDs 0-${upperBound}, falling back to account 0`,
+      );
+      return [0];
+    }
+
     return activeIds;
   }
 }

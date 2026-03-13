@@ -75,6 +75,7 @@ export interface TraderConfig {
   marginUtilizationTargetPct: number;
   minOrderNotionalUsd: number;
   allowedMarketIds?: number[];
+  blocklistedMarketIds?: number[];
   allowIsolatedMarkets: boolean;
   autoFundIsolatedMarkets: boolean;
   isolatedMarginBufferBps: number;
@@ -94,6 +95,13 @@ export interface TraderConfig {
   trailingStopArmPct: number;
   trailingStopGivebackPct: number;
   paperAssumeTakerEntry: boolean;
+  agentAllowEntries: boolean;
+  agentAllowAdds: boolean;
+  agentAllowReductions: boolean;
+  agentAllowCloses: boolean;
+  agentAllowCollateralOps: boolean;
+  agentConfidenceThreshold: number;
+  maxCollateralTransferUsd: number;
   dryRun: boolean;
   accountId?: number;
   rootAddress?: `0x${string}`;
@@ -132,6 +140,9 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
     marginUtilizationTargetPct: getOptionalNumber("BOROS_MARGIN_UTILIZATION_TARGET_PCT", 0.85),
     minOrderNotionalUsd: getOptionalNumber("BOROS_MIN_ORDER_NOTIONAL_USD", 10),
     allowedMarketIds: getOptionalNumberList("BOROS_ALLOWED_MARKET_IDS"),
+    blocklistedMarketIds: process.env.BOROS_BLOCKLIST_MARKET_IDS
+      ? process.env.BOROS_BLOCKLIST_MARKET_IDS.split(",").map(Number).filter((n) => n > 0)
+      : undefined,
     allowIsolatedMarkets: getOptionalBoolean("BOROS_ALLOW_ISOLATED_MARKETS", true),
     autoFundIsolatedMarkets: getOptionalBoolean("BOROS_AUTO_FUND_ISOLATED_MARKETS", true),
     isolatedMarginBufferBps: getOptionalNumber("BOROS_ISOLATED_MARGIN_BUFFER_BPS", 500),
@@ -143,7 +154,7 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
     minEntryLiqBufferBps: getOptionalNumber("BOROS_MIN_ENTRY_LIQ_BUFFER_BPS", 400),
     minMaintainLiqBufferBps: getOptionalNumber("BOROS_MIN_MAINTAIN_LIQ_BUFFER_BPS", 200),
     maxDailyDrawdownPct: getOptionalNumber("BOROS_MAX_DAILY_DRAWDOWN_PCT", 0.25),
-    maxFailureStreak: getOptionalNumber("BOROS_MAX_FAILURE_STREAK", 20),
+    maxFailureStreak: getOptionalNumber("BOROS_MAX_FAILURE_STREAK", 50),
     clipAprWindowBps: getOptionalNumber("BOROS_CLIP_APR_WINDOW_BPS", 500),
     marketOrderSlippage: getOptionalNumber("BOROS_MARKET_ORDER_SLIPPAGE", 0.05),
     takeProfitPnlPct: getOptionalNumber("BOROS_TAKE_PROFIT_PCT", 0.25),
@@ -151,6 +162,13 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
     trailingStopArmPct: getOptionalNumber("BOROS_TRAILING_STOP_ARM_PCT", 0.15),
     trailingStopGivebackPct: getOptionalNumber("BOROS_TRAILING_STOP_GIVEBACK_PCT", 0.10),
     paperAssumeTakerEntry: getOptionalBoolean("BOROS_PAPER_ASSUME_TAKER_ENTRY", true),
+    agentAllowEntries: getOptionalBoolean("BOROS_AGENT_ALLOW_ENTRIES", true),
+    agentAllowAdds: getOptionalBoolean("BOROS_AGENT_ALLOW_ADDS", true),
+    agentAllowReductions: getOptionalBoolean("BOROS_AGENT_ALLOW_REDUCTIONS", true),
+    agentAllowCloses: getOptionalBoolean("BOROS_AGENT_ALLOW_CLOSES", true),
+    agentAllowCollateralOps: getOptionalBoolean("BOROS_AGENT_ALLOW_COLLATERAL_OPS", true),
+    agentConfidenceThreshold: getOptionalNumber("BOROS_AGENT_CONFIDENCE_THRESHOLD", 0),
+    maxCollateralTransferUsd: getOptionalNumber("BOROS_MAX_COLLATERAL_TRANSFER_USD", 500),
     dryRun: getOptionalBoolean("BOROS_DRY_RUN", false),
     accountId: process.env.BOROS_ACCOUNT_ID ? Number(process.env.BOROS_ACCOUNT_ID) : undefined,
     rootAddress: process.env.BOROS_ROOT_ADDRESS as `0x${string}` | undefined,

@@ -158,6 +158,33 @@ function cleanup(): void {
   }
 }
 
+async function waitForHttp(url: string, timeoutMs = 15_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch {
+      // server not ready yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Timed out waiting for ${url}`);
+}
+
+async function postJson(url: string, body?: unknown): Promise<unknown> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || (json && typeof json === "object" && "ok" in json && !json.ok)) {
+    throw new Error(String((json as { error?: string }).error ?? `${res.status} ${res.statusText}`));
+  }
+  return json;
+}
+
 process.on("SIGINT", () => { cleanup(); process.exit(0); });
 process.on("SIGTERM", () => { cleanup(); process.exit(0); });
 
@@ -219,10 +246,11 @@ async function main(): Promise<void> {
   const stratIdx = await choose("What do you want to run?", [
     "Strategy Bot  — relative value trading (scan for edge, enter/exit automatically)",
     "Copy Trader   — follow another wallet's positions",
+    "Agent Mode    — autonomous ACP-powered Boros agent",
     "Dashboard     — monitoring UI only (no trading)",
   ], currentCopy ? 1 : 0);
 
-  if (stratIdx === 2) {
+  if (stratIdx === 3) {
     // Dashboard only
     console.log("\n  Starting dashboard...\n");
     writeEnvKey("BOROS_COPY_TRADE_ENABLED", currentCopy ? "true" : "false");
@@ -235,6 +263,7 @@ async function main(): Promise<void> {
   }
 
   const isCopy = stratIdx === 1;
+  const isAgent = stratIdx === 2;
 
   // ── Step 2: Paper or Live ──
   const modeIdx = await choose("Execution mode?", [
@@ -260,7 +289,9 @@ async function main(): Promise<void> {
 
   // ── Step 3: Strategy-specific config ──
 
-  if (isCopy) {
+  if (isAgent) {
+    writeEnvKey("BOROS_COPY_TRADE_ENABLED", "false");
+  } else if (isCopy) {
     // Copy trade settings
     const target = await input("Target address to copy", currentTarget || "0x...");
     const sizeRatio = await input("Size ratio (1.0 = match target)", env.BOROS_COPY_TRADE_SIZE_RATIO ?? "1.0");
@@ -292,15 +323,18 @@ async function main(): Promise<void> {
 
   // ── Step 4: Confirm and launch ──
 
-  const startDashboard = await confirm("Start dashboard alongside bot?", true);
-  const runOnce = await confirm("Single cycle only (test run)?", false);
+  const startDashboard = true;
+  const deployAgent = isAgent ? await confirm("Deploy Agent runtime immediately?", true) : false;
+  const runOnce = isAgent ? false : await confirm("Single cycle only (test run)?", false);
 
   // Summary
   console.log();
   console.log("  \x1b[33m── Launch Summary ──\x1b[0m");
-  console.log(`  Strategy:   ${isCopy ? "Copy Trade" : "Relative Value"}`);
+  console.log(`  Strategy:   ${isAgent ? "Agent" : isCopy ? "Copy Trade" : "Relative Value"}`);
   console.log(`  Mode:       ${mode}`);
-  if (isCopy) {
+  if (isAgent) {
+    console.log(`  Agent:      ${deployAgent ? "deploy on startup" : "UI only"}`);
+  } else if (isCopy) {
     console.log(`  Target:     ${truncAddr(readEnv().BOROS_COPY_TRADE_TARGET_ADDRESS ?? "")}`);
     console.log(`  Size ratio: ${readEnv().BOROS_COPY_TRADE_SIZE_RATIO ?? "1.0"}x`);
     console.log(`  Max notl:   $${readEnv().BOROS_COPY_TRADE_MAX_NOTIONAL_USD ?? "5000"}`);
@@ -309,8 +343,8 @@ async function main(): Promise<void> {
     console.log(`  Min edge:   ${readEnv().BOROS_MIN_EDGE_BPS ?? "150"} bps`);
     console.log(`  Max lever:  ${readEnv().BOROS_MAX_EFFECTIVE_LEVERAGE ?? "1.5"}x`);
   }
-  console.log(`  Dashboard:  ${startDashboard ? "yes" : "no"}`);
-  console.log(`  Run once:   ${runOnce ? "yes" : "no"}`);
+  console.log(`  Dashboard:  yes`);
+  console.log(`  Run once:   ${isAgent ? "n/a" : runOnce ? "yes" : "no"}`);
   console.log();
 
   const go = await confirm("Launch?", true);
@@ -323,13 +357,38 @@ async function main(): Promise<void> {
   rl.close();
   console.log();
 
+  // Re-sync process.env from the updated .env file so child processes get the new values
+  const updatedEnv = readEnv();
+  for (const [key, value] of Object.entries(updatedEnv)) {
+    process.env[key] = value;
+  }
+
   // ── Launch processes ──
 
-  if (startDashboard) {
-    spawnChild("npx", ["tsx", "server.ts"], "api", path.join(ROOT, "ui"));
-    spawnChild("npx", ["vite", "--port", "5173"], "vite", path.join(ROOT, "ui"));
-    console.log("  Dashboard: \x1b[36mhttp://localhost:5173\x1b[0m");
-    console.log("  API:       \x1b[36mhttp://localhost:3142\x1b[0m");
+  spawnChild("npx", ["tsx", "server.ts"], "api", path.join(ROOT, "ui"));
+  spawnChild("npx", ["vite", "--port", "5173"], "vite", path.join(ROOT, "ui"));
+  console.log("  Dashboard: \x1b[36mhttp://localhost:5173\x1b[0m");
+  console.log("  API:       \x1b[36mhttp://localhost:3142\x1b[0m");
+
+  if (isAgent) {
+    await waitForHttp("http://localhost:3142/api/agent/status");
+    if (deployAgent) {
+      const agentConfigRes = await fetch("http://localhost:3142/api/agent/config");
+      const agentConfig = await agentConfigRes.json();
+      await postJson("http://localhost:3142/api/agent/config", {
+        ...agentConfig,
+        mode,
+      });
+      await postJson("http://localhost:3142/api/agent/deploy", {
+        ...agentConfig,
+        mode,
+      });
+      console.log("  Agent:     deployed");
+    } else {
+      console.log("  Agent:     open Agent mode in the UI and deploy when ready");
+    }
+    console.log();
+    return;
   }
 
   // Start the bot

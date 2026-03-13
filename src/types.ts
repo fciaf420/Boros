@@ -4,6 +4,8 @@ export type OrderIntent = "maker" | "taker";
 export type PositionStatus = "OPEN" | "CLOSED";
 export type OrderLifecycleStatus = "SUBMITTED" | "OPEN" | "PARTIALLY_FILLED" | "FILLED" | "CANCELLED" | "REJECTED";
 export type TraderMode = "paper" | "live";
+export type AgentIntentAction = "ENTER" | "EXIT" | "ADD" | "REDUCE" | "HOLD" | "WATCH";
+export type AgentIntentStatus = "PENDING" | "APPLIED" | "REJECTED" | "EXPIRED";
 
 export interface MarketSummary {
   marketId: number;
@@ -216,6 +218,37 @@ export interface CycleSummary {
   topEdges: CycleTopEdge[];
   skipReasonCounts: Array<{ reason: string; count: number }>;
   actions: CycleAction[];
+}
+
+export interface AgentExecutionIntent {
+  id: number;
+  recordedAt: number;
+  marketId: number;
+  marketName?: string;
+  side?: TradeSide;
+  action: AgentIntentAction;
+  confidence: number;
+  thesis: string;
+  source: string;
+  expiresAt?: number;
+  status: AgentIntentStatus;
+  statusReason?: string;
+  appliedAt?: number;
+}
+
+export type AgentCollateralAction = "DEPOSIT_ISOLATED" | "WITHDRAW_ISOLATED" | "SWEEP_ALL_ISOLATED";
+export type AgentCollateralIntentStatus = "PENDING" | "APPLIED" | "REJECTED" | "FAILED";
+
+export interface AgentCollateralIntent {
+  id: number;
+  recordedAt: number;
+  action: AgentCollateralAction;
+  marketId?: number;
+  amountUsd?: number;
+  reason: string;
+  status: AgentCollateralIntentStatus;
+  statusReason?: string;
+  appliedAt?: number;
 }
 
 export type DeltaAction = "ENTER" | "EXIT" | "INCREASE" | "DECREASE";

@@ -15,6 +15,7 @@ export class CopyTrader {
   private running = false;
   private timer?: ReturnType<typeof setInterval>;
   private processing: Promise<void> | null = null;
+  private processingLock = false;
   private marketCache: Map<number, MarketSummary> = new Map();
   private lastMarketFetch = 0;
   private pollCount = 0;
@@ -60,6 +61,12 @@ export class CopyTrader {
       this.watcher.setAccountId(ids[0]);
     }
 
+    // Restore persisted failure streak from DB
+    this.failureStreak = this.store.getCopyFailureStreak();
+    if (this.failureStreak > 0) {
+      console.log(`[copy-trade] restored failure streak from DB: ${this.failureStreak}`);
+    }
+
     // Clear any stale kill switch state from a previous run
     this.store.appendKillSwitchEvent("resolved", { source: "copy-trade", reason: "bot restarted" });
 
@@ -100,12 +107,31 @@ export class CopyTrader {
 
   private async _runOnceImpl(): Promise<void> {
     if (!this.running) return;
+    if (this.processingLock) return;
+    this.processingLock = true;
+    try {
+      await this._runOnceBody();
+    } finally {
+      this.processingLock = false;
+    }
+  }
 
+  private async _runOnceBody(): Promise<void> {
     this.resetDailyCountersIfNeeded();
     const killSwitch = this.checkCopyKillSwitch();
     if (killSwitch.active) {
       console.log(`[copy-trade] kill switch active: ${killSwitch.reason}`);
       this.store.appendKillSwitchEvent(killSwitch.reason!, { source: "copy-trade", failureStreak: this.failureStreak });
+      await this.sendDiscordEmbed({
+        title: "KILL SWITCH ACTIVATED",
+        color: 0xff0000,
+        fields: [
+          { name: "Reason", value: killSwitch.reason!, inline: false },
+          { name: "Failure Streak", value: String(this.failureStreak), inline: true },
+          { name: "Daily PnL", value: `$${this.dailyPnlUsd.toFixed(2)}`, inline: true },
+        ],
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
@@ -157,8 +183,8 @@ export class CopyTrader {
         continue;
       }
 
-      // Block ENTER/INCREASE deltas if at max concurrent positions
-      if ((delta.action === "ENTER" || delta.action === "INCREASE") && this.store.getOpenCopyPositions().length >= this.config.copyTrade.maxConcurrentPositions) {
+      // Block ENTER deltas if at max concurrent positions (INCREASE is not a new position)
+      if (delta.action === "ENTER" && this.store.getOpenCopyPositions().length >= this.config.copyTrade.maxConcurrentPositions) {
         const record: CopyTradeRecord = {
           id: randomUUID(),
           deltaAction: delta.action,
@@ -179,14 +205,16 @@ export class CopyTrader {
 
       const record = await this.processDelta(delta);
 
-      // Track failure streak
+      // Track failure streak (persisted to DB)
       if (record.status === "EXECUTED") {
         this.failureStreak = 0;
+        this.store.setCopyFailureStreak(this.failureStreak);
         if (record.ourClientOrderId) {
           this.pendingOrderIds.push(record.ourClientOrderId);
         }
       } else if (record.status === "FAILED") {
         this.failureStreak++;
+        this.store.setCopyFailureStreak(this.failureStreak);
       }
 
       this.store.saveCopyTradeRecord(record);
@@ -236,7 +264,7 @@ export class CopyTrader {
       }
     }
 
-    this.logDriftWarnings(positions);
+    await this.logDriftWarnings(positions);
 
     if (processedRecords.length > 0) {
       await this.sendCycleSummary(deltas, processedRecords, positions.length);
@@ -247,6 +275,14 @@ export class CopyTrader {
     if (this.failureStreak >= this.config.copyTrade.maxFailureStreak) {
       return { active: true, reason: "max failure streak exceeded" };
     }
+
+    // Check daily drawdown against equity-derived threshold
+    const equityUsd = this.config.startingEquityUsd;
+    const maxDailyLossUsd = equityUsd * this.config.copyTrade.maxDailyDrawdownPct;
+    if (this.dailyPnlUsd <= -maxDailyLossUsd) {
+      return { active: true, reason: `daily drawdown limit hit: PnL=$${this.dailyPnlUsd.toFixed(2)} limit=-$${maxDailyLossUsd.toFixed(2)}` };
+    }
+
     return { active: false };
   }
 
@@ -310,11 +346,18 @@ export class CopyTrader {
     }
 
     try {
-      const candidate = await this.executor.buildCopyCandidate(delta, market);
+      // Look up existing copy position for this market+side
+      const posId = `copy:${delta.marketId}:${delta.side}`;
+      const existingPosition = this.store.getOpenCopyPositions().find(p => p.id === posId);
+
+      // Pass existing notional to buildCopyCandidate so cumulative cap is enforced for INCREASE
+      const existingNotionalUsd = existingPosition?.notionalUsd ?? 0;
+      const candidate = await this.executor.buildCopyCandidate(delta, market, existingNotionalUsd);
 
       // Check slippage
-      if (!this.executor.isWithinSlippage(delta, candidate.orderApr)) {
-        const reason = `APR slippage too high: order=${candidate.orderApr.toFixed(4)} target=${delta.targetEntryApr.toFixed(4)} max=${this.config.copyTrade.maxSlippage}`;
+      if (!this.executor.isWithinSlippage(delta, candidate.orderApr, market.midApr)) {
+        const referenceApr = (delta.action === "EXIT" || delta.action === "DECREASE") ? market.midApr : delta.targetEntryApr;
+        const reason = `APR slippage too high: order=${candidate.orderApr.toFixed(4)} ref=${referenceApr.toFixed(4)} max=${this.config.copyTrade.maxSlippage}`;
         console.log(`[copy-trade] SKIP ${delta.action} market=${delta.marketId}: ${reason}`);
         return {
           id: recordId,
@@ -332,9 +375,11 @@ export class CopyTrader {
       console.log(`[copy-trade] EXECUTE ${delta.action} ${delta.side} market=${delta.marketId} size=${candidate.sizeBase.toFixed(4)} apr=${candidate.orderApr.toFixed(4)}`);
       const executionRecord = await this.executeWithRetry(candidate);
 
+      // Bug 5 fix: persist the execution record so reconciliation can find it
+      this.store.saveOrder(executionRecord);
+
       // Track copy position
-      if (delta.action === "ENTER" || delta.action === "INCREASE") {
-        const posId = `copy:${delta.marketId}:${delta.side}`;
+      if (delta.action === "ENTER") {
         this.store.upsertCopyPosition({
           id: posId,
           marketId: delta.marketId,
@@ -348,9 +393,56 @@ export class CopyTrader {
           openedAt: Math.floor(Date.now() / 1000),
           clientOrderId: executionRecord.clientOrderId,
         });
-      } else if (delta.action === "EXIT" || delta.action === "DECREASE") {
-        const posId = `copy:${delta.marketId}:${delta.side}`;
+      } else if (delta.action === "INCREASE") {
+        // Bug 3 fix: add increment to existing size, not overwrite
+        const prevSize = existingPosition?.sizeBase ?? 0;
+        const newTotalSize = prevSize + candidate.sizeBase;
+        const prevNotional = existingPosition?.notionalUsd ?? 0;
+        const newTotalNotional = prevNotional + candidate.notionalUsd;
+        const prevMargin = existingPosition?.marginUsd ?? 0;
+        const newTotalMargin = prevMargin + candidate.plannedMarginUsd;
+        this.store.upsertCopyPosition({
+          id: posId,
+          marketId: delta.marketId,
+          side: delta.side,
+          sizeBase: newTotalSize,
+          sizeBase18: (BigInt(existingPosition?.sizeBase18 ?? "0") + candidate.sizeBase18).toString(),
+          entryApr: existingPosition?.entryApr ?? candidate.orderApr,
+          notionalUsd: newTotalNotional,
+          marginUsd: newTotalMargin,
+          status: "OPEN",
+          openedAt: existingPosition?.openedAt ?? Math.floor(Date.now() / 1000),
+          clientOrderId: executionRecord.clientOrderId,
+        });
+      } else if (delta.action === "EXIT") {
+        // Bug 1 fix: calculate realized PnL for EXIT
+        if (existingPosition) {
+          const direction = delta.side === "LONG" ? 1 : -1;
+          const pnl = (executionRecord.fillApr - existingPosition.entryApr) * existingPosition.sizeBase * direction;
+          this.dailyPnlUsd += pnl;
+        }
         this.store.closeCopyPosition(posId);
+      } else if (delta.action === "DECREASE") {
+        // Bug 2 fix: reduce position size instead of closing entirely
+        if (existingPosition) {
+          const direction = delta.side === "LONG" ? 1 : -1;
+          const pnl = (executionRecord.fillApr - existingPosition.entryApr) * candidate.sizeBase * direction;
+          this.dailyPnlUsd += pnl;
+
+          const newSize = Math.max(0, existingPosition.sizeBase - candidate.sizeBase);
+          if (newSize <= 0) {
+            this.store.closeCopyPosition(posId);
+          } else {
+            const sizeRatio = newSize / existingPosition.sizeBase;
+            const newSizeBase18 = (BigInt(existingPosition.sizeBase18) * BigInt(Math.round(sizeRatio * 1e9)) / BigInt(1e9)).toString();
+            const newNotional = existingPosition.notionalUsd * sizeRatio;
+            const newMargin = existingPosition.marginUsd * sizeRatio;
+            this.store.reduceCopyPosition(posId, newSize, newSizeBase18, newNotional, newMargin);
+          }
+        } else {
+          // No existing position to reduce — just close
+          this.store.closeCopyPosition(posId);
+        }
       }
 
       return {
@@ -385,20 +477,38 @@ export class CopyTrader {
     }
   }
 
-  private logDriftWarnings(targetPositions: TargetPositionSnapshot[]): void {
+  private async logDriftWarnings(targetPositions: TargetPositionSnapshot[]): Promise<void> {
     const openCopyPositions = this.store.getOpenCopyPositions();
     const targetMarketIds = new Set(targetPositions.map(p => p.marketId));
     const copyMarketIds = new Set(openCopyPositions.map(p => p.marketId));
 
+    const driftDetails: string[] = [];
+
     for (const pos of openCopyPositions) {
       if (!targetMarketIds.has(pos.marketId)) {
-        console.log(`[copy-trade] DRIFT: we have open position on market ${pos.marketId} but target does not`);
+        const msg = `We have open position on market ${pos.marketId} but target does not`;
+        console.log(`[copy-trade] DRIFT: ${msg}`);
+        driftDetails.push(msg);
       }
     }
     for (const pos of targetPositions) {
       if (!copyMarketIds.has(pos.marketId)) {
-        console.log(`[copy-trade] DRIFT: target has position on market ${pos.marketId} but we do not`);
+        const msg = `Target has position on market ${pos.marketId} but we do not`;
+        console.log(`[copy-trade] DRIFT: ${msg}`);
+        driftDetails.push(msg);
       }
+    }
+
+    if (driftDetails.length > 0) {
+      await this.sendDiscordEmbed({
+        title: "POSITION DRIFT DETECTED",
+        color: 0xffaa00,
+        fields: [
+          { name: "Drift Count", value: String(driftDetails.length), inline: true },
+          { name: "Details", value: driftDetails.join("\n").slice(0, 1024), inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+      });
     }
   }
 
@@ -479,6 +589,26 @@ export class CopyTrader {
       });
     } catch (error) {
       console.error("[copy-trade] discord webhook failed:", error);
+    }
+  }
+
+  private async sendDiscordEmbed(embed: {
+    title: string;
+    color: number;
+    fields: Array<{ name: string; value: string; inline: boolean }>;
+    timestamp: string;
+  }): Promise<void> {
+    const webhookUrl = this.config.copyTrade.discordWebhookUrl;
+    if (!webhookUrl) return;
+
+    try {
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ embeds: [embed] }),
+      });
+    } catch (error) {
+      console.error("[copy-trade] discord embed failed:", error);
     }
   }
 

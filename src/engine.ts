@@ -4,7 +4,7 @@ import { RuntimeStore } from "./db.js";
 import { LiveBroker, PaperBroker, type Broker } from "./execution.js";
 import { allocateSignalWeightedBudgets, chooseInitialSizeBase, computeRiskState, makePositionId, openPositionPnlPct, openPositionPnlUsd, orderBookLiquidity, perMarketMarginBudget, refreshOpenPosition, remainingMarginBudget, sizeAsBase18 } from "./risk.js";
 import { estimateFairValue } from "./strategy.js";
-import type { ActionType, CycleAction, CycleSummary, ExecutionRecord, MarketEvaluation, MarketSnapshot, OpenPosition, TradeCandidate, TradeSide } from "./types.js";
+import type { ActionType, AgentCollateralIntent, AgentExecutionIntent, CycleAction, CycleSummary, ExecutionRecord, MarketEvaluation, MarketSnapshot, OpenPosition, TradeCandidate, TradeSide } from "./types.js";
 import { decimalToBps, fromBase18, settlementAdjustedEdge } from "./utils.js";
 
 const MAKER_TIF = 3;
@@ -37,6 +37,22 @@ export class RelativeValueTrader {
         this.store.setRuntimeValue("last_position_sync_notes", synced.notes);
       }
     }
+
+    // Use real on-chain equity when account credentials are configured
+    if (this.config.mode === "live" && this.config.rootAddress && this.config.accountId) {
+      try {
+        const onChain = await this.api.fetchAccountEquity(this.config.rootAddress, this.config.accountId);
+        if (onChain.equity > 0) {
+          this.config.startingEquityUsd = onChain.equity;
+          this.store.setRuntimeValue("on_chain_equity", onChain.equity);
+          this.store.setRuntimeValue("on_chain_available_balance", onChain.availableBalance);
+          this.store.setRuntimeValue("on_chain_margin_used", onChain.initialMarginUsed);
+        }
+      } catch {
+        // Non-fatal — fall back to configured startingEquityUsd
+      }
+    }
+
     const openPositions = allPositions.filter((position) => position.status === "OPEN");
     const storedBaseline = this.store.getRuntimeValue<number>(baselineKey);
     const baseline = this.normalizeDailyBaseline(storedBaseline, openPositions);
@@ -57,6 +73,7 @@ export class RelativeValueTrader {
       const markets = allMarkets
         .filter((market) =>
           (!this.config.allowedMarketIds || this.config.allowedMarketIds.includes(market.marketId)) &&
+          (!this.config.blocklistedMarketIds || !this.config.blocklistedMarketIds.includes(market.marketId)) &&
           market.isWhitelisted &&
           market.state === "Normal" &&
           (this.config.allowIsolatedMarkets || !market.isIsolatedOnly) &&
@@ -147,6 +164,8 @@ export class RelativeValueTrader {
         this.store.saveSignal(evaluation.fairValue, evaluation.candidate);
       }
 
+      const agentIntentActions = await this.handleAgentIntents(evaluations, positionsForCycle, activeOrders, riskState);
+      await this.handleCollateralIntents(snapshotByMarket);
       const exitActions = await this.handleExits(evaluations, positionsForCycle, activeOrders);
       const entryActions = await this.handleEntries(evaluations, positionsForCycle, activeOrders, riskState);
 
@@ -164,7 +183,7 @@ export class RelativeValueTrader {
         snapshots,
         snapshotErrors,
         evaluations,
-        actions: [...exitActions, ...entryActions],
+        actions: [...agentIntentActions, ...exitActions, ...entryActions],
         openPositions: positionsForCycle,
         killSwitchActive: false,
       });
@@ -243,7 +262,10 @@ export class RelativeValueTrader {
 
     if (existingPosition) {
       const activeEdge = existingPosition.side === "LONG" ? longEdge : shortEdge;
-      const flipped = existingPosition.side === "LONG" ? shortEdge >= this.config.exitEdgeBps : longEdge >= this.config.exitEdgeBps;
+      const oppositeEdge = existingPosition.side === "LONG" ? shortEdge : longEdge;
+      // Only consider it a "flip" if the opposite side's edge exceeds our side AND our side is below entry threshold.
+      // A SHORT with 420bps is not flipped just because LONG shows 50bps — LONG must dominate.
+      const flipped = oppositeEdge > activeEdge && oppositeEdge >= this.config.minEdgeBps && activeEdge < this.config.exitEdgeBps;
       const liquidationBreach = existingPosition.liquidationBufferBps !== undefined
         && existingPosition.liquidationBufferBps < this.config.minMaintainLiqBufferBps;
       const positionPnlUsd = openPositionPnlUsd(existingPosition);
@@ -289,8 +311,17 @@ export class RelativeValueTrader {
         return reject("open position held: exit and add rules not triggered");
       }
     } else {
-      if (riskState.openPositions.length >= this.config.maxConcurrentMarkets || remainingMarginBudget(this.config, riskState) <= 0) {
-        return reject("portfolio limit reached");
+      if (riskState.openPositions.length >= this.config.maxConcurrentMarkets) {
+        return reject("max concurrent positions reached", `${riskState.openPositions.length}/${this.config.maxConcurrentMarkets}`);
+      }
+      if (remainingMarginBudget(this.config, riskState) <= 0) {
+        return reject("no margin budget remaining", `equity=$${riskState.equityUsd.toFixed(2)} used=$${riskState.usedInitialMarginUsd.toFixed(2)}`);
+      }
+      // Pre-check: if per-market budget can't meet the $10 min notional after margin floor, skip
+      const entryBudget = marginBudgetOverrideUsd ?? perMarketMarginBudget(this.config, riskState);
+      const maxSizeFromBudget = chooseInitialSizeBase(this.config, entryBudget, snapshot);
+      if (maxSizeFromBudget < this.config.minOrderNotionalUsd) {
+        return reject("insufficient bankroll for entry", `budget=$${entryBudget.toFixed(2)} max_notional=$${maxSizeFromBudget.toFixed(2)} margin_floor=${(snapshot.market.marginFloor * 100).toFixed(1)}% min_notional=$${this.config.minOrderNotionalUsd.toFixed(2)}`);
       }
       if (longEdge >= this.config.minEdgeBps) {
         side = "LONG";
@@ -482,7 +513,12 @@ export class RelativeValueTrader {
       })
       .slice(0, this.config.maxConcurrentMarkets);
 
+    let entriesFilled = 0;
     for (const { evaluation, candidate, snapshot } of candidates) {
+      // Stop submitting entries once we've filled all available slots
+      if (candidate.action === "ENTER" && entriesFilled >= availableSlots) {
+        continue;
+      }
       const position = positions.find((row) => row.marketId === candidate.marketId && row.status === "OPEN");
       if (candidate.action === "ENTER" && position) {
         continue;
@@ -509,9 +545,135 @@ export class RelativeValueTrader {
       const action = await this.executeCandidate(executableCandidate, snapshot, position, positions, activeOrders);
       if (action) {
         actions.push(action);
+        if (candidate.action === "ENTER") {
+          entriesFilled++;
+        }
       }
     }
     return actions;
+  }
+
+  private async handleAgentIntents(
+    evaluations: MarketEvaluation[],
+    positions: OpenPosition[],
+    activeOrders: ExecutionRecord[],
+    riskState: ReturnType<typeof computeRiskState>,
+  ): Promise<CycleAction[]> {
+    const actions: CycleAction[] = [];
+    const pendingIntents = this.store.getPendingAgentIntents();
+    if (pendingIntents.length === 0) {
+      return actions;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const evaluationByMarket = new Map(evaluations.map((evaluation) => [evaluation.snapshot.market.marketId, evaluation]));
+
+    for (const intent of pendingIntents) {
+      if (intent.expiresAt && intent.expiresAt < now) {
+        this.store.resolveAgentIntent(intent.id, "EXPIRED", "Intent expired before execution");
+        continue;
+      }
+
+      if (intent.confidence < this.config.agentConfidenceThreshold) {
+        this.store.resolveAgentIntent(intent.id, "REJECTED", `Confidence ${intent.confidence.toFixed(2)} below threshold ${this.config.agentConfidenceThreshold.toFixed(2)}`);
+        continue;
+      }
+
+      const permissionDenied = this.checkAgentIntentPermission(intent);
+      if (permissionDenied) {
+        this.store.resolveAgentIntent(intent.id, "REJECTED", permissionDenied);
+        continue;
+      }
+
+      const evaluation = evaluationByMarket.get(intent.marketId);
+      if (!evaluation) {
+        this.store.resolveAgentIntent(intent.id, "REJECTED", "Market snapshot unavailable for intent market");
+        continue;
+      }
+
+      const existingPosition = positions.find((position) => position.marketId === intent.marketId && position.status === "OPEN");
+      const built = await this.buildCandidateFromIntent(intent, evaluation, existingPosition, riskState, activeOrders);
+      if (!built.candidate) {
+        this.store.resolveAgentIntent(intent.id, "REJECTED", built.reason ?? "Unable to build execution candidate");
+        continue;
+      }
+
+      const cycleAction = await this.executeCandidate(built.candidate, evaluation.snapshot, existingPosition, positions, activeOrders);
+      if (!cycleAction) {
+        this.store.resolveAgentIntent(intent.id, "REJECTED", "Execution failed or produced no actionable result");
+        continue;
+      }
+
+      this.store.resolveAgentIntent(intent.id, "APPLIED", `${cycleAction.label} ${cycleAction.side} (${cycleAction.orderStatus})`);
+      actions.push(cycleAction);
+    }
+
+    return actions;
+  }
+
+  private checkAgentIntentPermission(intent: AgentExecutionIntent): string | null {
+    const action = intent.action;
+    if (action === "ENTER" && !this.config.agentAllowEntries) {
+      return "Permission denied: allowEntries is disabled in agent config";
+    }
+    if (action === "ADD" && !this.config.agentAllowAdds) {
+      return "Permission denied: allowAdds is disabled in agent config";
+    }
+    if (action === "REDUCE" && !this.config.agentAllowReductions) {
+      return "Permission denied: allowReductions is disabled in agent config";
+    }
+    if (action === "EXIT" && !this.config.agentAllowCloses) {
+      return "Permission denied: allowCloses is disabled in agent config";
+    }
+    return null;
+  }
+
+  private async handleCollateralIntents(snapshotByMarket: Map<number, MarketSnapshot>): Promise<void> {
+    if (!this.config.agentAllowCollateralOps) {
+      return;
+    }
+
+    const pendingIntents = this.store.getPendingCollateralIntents();
+    if (pendingIntents.length === 0) {
+      return;
+    }
+
+    for (const intent of pendingIntents) {
+      try {
+        if (intent.action === "SWEEP_ALL_ISOLATED") {
+          const marketsToSweep: Array<{ marketId: number; tokenId: number }> = [];
+          for (const [marketId, snapshot] of snapshotByMarket) {
+            marketsToSweep.push({ marketId, tokenId: snapshot.market.tokenId });
+          }
+          const notes = await this.broker.sweepIsolatedCash(marketsToSweep);
+          this.store.resolveCollateralIntent(intent.id, "APPLIED", notes.length > 0 ? notes.join("; ") : "No isolated cash to sweep");
+          continue;
+        }
+
+        if (!intent.marketId) {
+          this.store.resolveCollateralIntent(intent.id, "REJECTED", "marketId required for DEPOSIT_ISOLATED / WITHDRAW_ISOLATED");
+          continue;
+        }
+
+        const snapshot = snapshotByMarket.get(intent.marketId);
+        if (!snapshot) {
+          this.store.resolveCollateralIntent(intent.id, "REJECTED", `Market ${intent.marketId} not found in current snapshots`);
+          continue;
+        }
+
+        const amountUsd = intent.amountUsd ?? 0;
+        if (intent.action === "DEPOSIT_ISOLATED" && amountUsd <= 0) {
+          this.store.resolveCollateralIntent(intent.id, "REJECTED", "amountUsd must be > 0 for DEPOSIT_ISOLATED");
+          continue;
+        }
+
+        const isDeposit = intent.action === "DEPOSIT_ISOLATED";
+        const note = await this.broker.transferCollateral(intent.marketId, snapshot.market.tokenId, amountUsd, isDeposit);
+        this.store.resolveCollateralIntent(intent.id, "APPLIED", note);
+      } catch (err) {
+        this.store.resolveCollateralIntent(intent.id, "FAILED", String(err));
+      }
+    }
   }
 
   private async handleExits(
@@ -539,6 +701,102 @@ export class RelativeValueTrader {
       }
     }
     return actions;
+  }
+
+  private async buildCandidateFromIntent(
+    intent: AgentExecutionIntent,
+    evaluation: MarketEvaluation,
+    existingPosition: OpenPosition | undefined,
+    riskState: ReturnType<typeof computeRiskState>,
+    activeOrders: ExecutionRecord[],
+  ): Promise<{ candidate?: TradeCandidate; reason?: string }> {
+    if (intent.action === "WATCH" || intent.action === "HOLD") {
+      return { reason: `Intent action ${intent.action} is informational only` };
+    }
+
+    if (intent.action === "REDUCE") {
+      if (!existingPosition) {
+        return { reason: "REDUCE intent rejected because no open position exists for that market" };
+      }
+      const reduceSide: TradeSide = existingPosition.side === "LONG" ? "SHORT" : "LONG";
+      const reduceFraction = this.extractReduceFraction(intent);
+      return this.buildForcedExitCandidate(
+        evaluation.snapshot,
+        evaluation.fairValue.fairApr,
+        existingPosition,
+        reduceSide,
+        Math.max(evaluation.fairValue.edgeBpsLong, evaluation.fairValue.edgeBpsShort),
+        "AgentIntentReduce",
+        `REDUCE ${existingPosition.side} by ${(reduceFraction * 100).toFixed(0)}% from ACP agent intent: ${intent.thesis}`,
+        {
+          confidence: intent.confidence,
+          reduceFraction,
+        },
+        reduceFraction,
+      );
+    }
+
+    if (intent.action === "EXIT") {
+      if (!existingPosition) {
+        return { reason: "EXIT intent rejected because no open position exists for that market" };
+      }
+      const side: TradeSide = existingPosition.side === "LONG" ? "SHORT" : "LONG";
+      return this.buildForcedExitCandidate(
+        evaluation.snapshot,
+        evaluation.fairValue.fairApr,
+        existingPosition,
+        side,
+        Math.max(evaluation.fairValue.edgeBpsLong, evaluation.fairValue.edgeBpsShort),
+        "AgentIntent",
+        `EXIT ${side} from ACP agent intent: ${intent.thesis}`,
+        { confidence: intent.confidence },
+      );
+    }
+
+    if (!intent.side) {
+      return { reason: `${intent.action} intent missing side` };
+    }
+
+    const candidate = evaluation.candidate;
+    if (!candidate) {
+      return { reason: "No executable market candidate available for requested intent" };
+    }
+
+    if (candidate.side !== intent.side) {
+      return { reason: `Intent side ${intent.side} does not match current executable side ${candidate.side}` };
+    }
+
+    if (intent.action === "ENTER") {
+      if (existingPosition) {
+        return { reason: "ENTER intent rejected because position is already open" };
+      }
+      if (candidate.action !== "ENTER") {
+        return { reason: `Current executable action is ${candidate.action}, not ENTER` };
+      }
+      return { candidate: { ...candidate, rationale: `${candidate.rationale} | ACP intent: ${intent.thesis}` } };
+    }
+
+    if (intent.action === "ADD") {
+      if (!existingPosition) {
+        return { reason: "ADD intent rejected because there is no existing position" };
+      }
+      const rebuilt = await this.buildCandidate(
+        evaluation.snapshot,
+        evaluation.fairValue,
+        riskState,
+        activeOrders,
+        existingPosition,
+      );
+      if (!rebuilt.candidate) {
+        return rebuilt;
+      }
+      if (rebuilt.candidate.action !== "ADD" || rebuilt.candidate.side !== intent.side) {
+        return { reason: `Current executable action is ${rebuilt.candidate.action}/${rebuilt.candidate.side}, not ADD/${intent.side}` };
+      }
+      return { candidate: { ...rebuilt.candidate, rationale: `${rebuilt.candidate.rationale} | ACP intent: ${intent.thesis}` } };
+    }
+
+    return { reason: `Unsupported intent action ${intent.action}` };
   }
 
   private async executeCandidate(
@@ -698,7 +956,17 @@ export class RelativeValueTrader {
     status: string,
     rationale: string,
     raw: Record<string, number>,
+    sizeFraction = 1,
   ): { candidate: TradeCandidate } {
+    const boundedFraction = Math.max(0.05, Math.min(1, sizeFraction));
+    const targetSizeBase = existingPosition.sizeBase * boundedFraction;
+    const targetSizeBase18 = sizeAsBase18(targetSizeBase);
+    const existingSizeBase18 = BigInt(existingPosition.sizeBase18);
+    const finalSizeBase18 = targetSizeBase18 > existingSizeBase18 ? existingSizeBase18 : targetSizeBase18;
+    const finalSizeBase = fromBase18(finalSizeBase18);
+    const remainingRatio = existingPosition.sizeBase <= 0
+      ? 0
+      : Math.min(1, finalSizeBase / existingPosition.sizeBase);
     return {
       candidate: {
         marketId: snapshot.market.marketId,
@@ -712,12 +980,12 @@ export class RelativeValueTrader {
         targetApr,
         orderTick: this.selectOrderTick(snapshot, side, "taker"),
         orderApr: this.selectOrderApr(snapshot, side, "taker"),
-        sizeBase: existingPosition.sizeBase,
-        sizeBase18: BigInt(existingPosition.sizeBase18),
-        notionalUsd: existingPosition.notionalUsd,
-        plannedMarginUsd: existingPosition.initialMarginUsd,
+        sizeBase: finalSizeBase,
+        sizeBase18: finalSizeBase18,
+        notionalUsd: existingPosition.notionalUsd * remainingRatio,
+        plannedMarginUsd: existingPosition.initialMarginUsd * remainingRatio,
         simulation: {
-          marginRequiredUsd: existingPosition.initialMarginUsd,
+          marginRequiredUsd: existingPosition.initialMarginUsd * remainingRatio,
           actualLeverage: existingPosition.actualLeverage,
           liquidationApr: existingPosition.liquidationApr,
           liquidationBufferBps: existingPosition.liquidationBufferBps,
@@ -729,6 +997,27 @@ export class RelativeValueTrader {
         rationale,
       },
     };
+  }
+
+  private extractReduceFraction(intent: AgentExecutionIntent): number {
+    const thesis = intent.thesis.toLowerCase();
+    const percentMatch = thesis.match(/(\d{1,3})(?:\s*%|\s*percent)/);
+    if (percentMatch) {
+      const parsed = Number(percentMatch[1]);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.max(0.05, Math.min(1, parsed / 100));
+      }
+    }
+    if (/\bhalf\b|\bhalve\b/.test(thesis)) {
+      return 0.5;
+    }
+    if (/\bquarter\b|\btrim small\b/.test(thesis)) {
+      return 0.25;
+    }
+    if (/\bmost\b|\bmajority\b/.test(thesis)) {
+      return 0.75;
+    }
+    return 0.5;
   }
 
   private normalizeDailyBaseline(storedBaseline: number | undefined, openPositions: OpenPosition[]): number {

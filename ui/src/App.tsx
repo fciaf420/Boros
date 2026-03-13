@@ -3,7 +3,7 @@ import { usePolling } from "./hooks/usePolling";
 import type {
   MarketsResponse, PositionRow, OrderRow, SignalRow, KillEventRow,
   AppState, RiskState, CopyPositionRow, CopyTradeRow, CopyTargetRow,
-  AccountSummary, OnChainPositionsResponse,
+  AccountSummary, OnChainPositionsResponse, AppTab,
 } from "./types";
 import Header from "./components/Header";
 import MarketGrid from "./components/MarketGrid";
@@ -17,6 +17,7 @@ import CopyRiskPanel from "./components/CopyRiskPanel";
 import BotStatus from "./components/BotStatus";
 import TargetTracker from "./components/TargetTracker";
 import OnChainPositions from "./components/OnChainPositions";
+import AgentMode from "./components/AgentMode";
 import WalletLookup from "./components/WalletLookup";
 
 const POLL_FAST = 5_000;
@@ -24,7 +25,7 @@ const POLL_SLOW = 10_000;
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"strategy" | "copy" | "wallet">("strategy");
+  const [activeTab, setActiveTab] = useState<AppTab>("strategy");
   const [logHeight, setLogHeight] = useState(110);
   const dragging = useRef(false);
 
@@ -71,8 +72,8 @@ export default function App() {
 
   // Auto-sync tab from mode detection
   useEffect(() => {
-    if (isCopyMode) setActiveTab("copy");
-  }, [isCopyMode]);
+    if (isCopyMode && activeTab === "strategy") setActiveTab("copy");
+  }, [isCopyMode, activeTab]);
 
   // Build risk state: prefer on-chain account data, fall back to bot's internal state
   const botRiskState = (appState.data?.runtimeState?.risk_state as RiskState) ?? null;
@@ -93,7 +94,7 @@ export default function App() {
     return botRiskState;
   }, [account.data, botRiskState]);
 
-  // Keyboard shortcuts: 1=Strategy, 2=Copy, s=Settings, Escape=close settings
+  // Keyboard shortcuts: 1=Strategy, 2=Copy, 3=Wallet, 4=Agent, s=Settings, Escape=close settings
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (document.activeElement?.tagName ?? "").toUpperCase();
@@ -102,6 +103,7 @@ export default function App() {
         case "1": setActiveTab("strategy"); break;
         case "2": setActiveTab("copy"); break;
         case "3": setActiveTab("wallet"); break;
+        case "4": setActiveTab("agent"); break;
         case "s": setSettingsOpen(prev => !prev); break;
         case "Escape": setSettingsOpen(false); break;
       }
@@ -189,11 +191,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "wallet" ? (
-          <div className="overflow-hidden flex-1 p-0.5">
-            <WalletLookup markets={markets.data} />
-          </div>
-        ) : activeTab === "strategy" ? (
+        {activeTab === "strategy" ? (
           <div className="grid gap-0.5 p-0.5 overflow-hidden flex-1 grid-cols-[2fr_1fr_360px] grid-rows-[3fr_2fr]">
             <MarketGrid
               markets={markets.data}
@@ -234,7 +232,7 @@ export default function App() {
               orders={orders.data}
             />
           </div>
-        ) : (
+        ) : activeTab === "copy" ? (
           <div className="grid gap-0.5 p-0.5 overflow-hidden flex-1 grid-cols-[2fr_1fr_360px] grid-rows-[3fr_2fr]">
             <MarketGrid
               markets={markets.data}
@@ -273,7 +271,24 @@ export default function App() {
               stale={copyTargets.stale}
             />
           </div>
-        )}
+        ) : activeTab === "wallet" ? (
+          <div className="p-0.5 overflow-hidden flex-1">
+            <WalletLookup markets={markets.data} />
+          </div>
+        ) : null}
+        {/* Keep AgentMode always mounted so polling state survives tab switches */}
+        <div className={activeTab === "agent" ? "flex flex-col overflow-hidden flex-1" : "hidden"}>
+          <AgentMode
+            markets={markets.data}
+            account={account.data}
+            onChainPositions={onChainPositions.data}
+            onChainLoading={onChainPositions.loading}
+            onChainUpdated={onChainPositions.lastUpdated}
+            onChainError={onChainPositions.data?.error ?? onChainPositions.error}
+            onChainStale={onChainPositions.stale}
+            riskState={riskState}
+          />
+        </div>
       </div>
 
       <div className="overflow-hidden flex flex-col">

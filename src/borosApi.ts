@@ -201,6 +201,32 @@ export class BorosApiClient {
     };
   }
 
+  public async fetchAccountEquity(userAddress: string, accountId: number): Promise<{ equity: number; availableBalance: number; initialMarginUsed: number }> {
+    const data = await this.request<{
+      collaterals: Array<{
+        tokenId: number;
+        totalNetBalance: string;
+        crossPosition: {
+          netBalance: string;
+          availableBalance: string;
+          initialMargin: string;
+        };
+      }>;
+    }>(`/v1/collaterals/summary?userAddress=${userAddress}&accountId=${accountId}`);
+    let equity = 0;
+    let availableBalance = 0;
+    let initialMarginUsed = 0;
+    for (const c of data.collaterals ?? []) {
+      equity += fromBase18(c.totalNetBalance ?? "0");
+      const cross = c.crossPosition;
+      if (cross) {
+        availableBalance += fromBase18(cross.availableBalance ?? "0");
+        initialMarginUsed += fromBase18(cross.initialMargin ?? "0");
+      }
+    }
+    return { equity, availableBalance, initialMarginUsed };
+  }
+
   public async fetchActivePositions(userAddress: string, accountId: number): Promise<Array<Record<string, unknown>>> {
     const data = await this.request<{
       collaterals: Array<{

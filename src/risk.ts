@@ -124,7 +124,15 @@ export function orderBookLiquidity(side: TradeSide, snapshot: MarketSnapshot): n
 
 export function chooseInitialSizeBase(config: TraderConfig, marginBudgetUsd: number, snapshot: MarketSnapshot): number {
   const targetLeverage = Math.min(snapshot.market.defaultLeverage, snapshot.market.maxLeverage, config.maxEffectiveLeverage);
-  return marginBudgetUsd * targetLeverage;
+  // The margin floor sets the actual minimum margin ratio for this market.
+  // Max notional from leverage: marginBudget × leverage
+  // Max notional from floor: marginBudget / marginFloor
+  // Take the smaller of the two — the floor often binds tighter than leverage.
+  const fromLeverage = marginBudgetUsd * targetLeverage;
+  const fromFloor = snapshot.market.marginFloor > 0
+    ? marginBudgetUsd / snapshot.market.marginFloor
+    : fromLeverage;
+  return Math.min(fromLeverage, fromFloor);
 }
 
 export function makePositionId(marketId: number, timestamp: number, side: TradeSide): string {
