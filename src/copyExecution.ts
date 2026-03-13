@@ -53,7 +53,8 @@ export class CopyExecutor {
     const preNotionalUsd = sizeBase * market.assetMarkPrice;
     if (preNotionalUsd < this.config.minOrderNotionalUsd) {
       if (this.config.roundUpToMinNotional && action !== "EXIT") {
-        sizeBase = this.config.minOrderNotionalUsd / market.assetMarkPrice;
+        // Add 5% buffer to avoid rounding/precision rejections from the API
+        sizeBase = (this.config.minOrderNotionalUsd * 1.05) / market.assetMarkPrice;
       } else {
         throw new Error(`Order notional $${preNotionalUsd.toFixed(2)} below $${this.config.minOrderNotionalUsd} minimum`);
       }

@@ -17,13 +17,14 @@ import CopyRiskPanel from "./components/CopyRiskPanel";
 import BotStatus from "./components/BotStatus";
 import TargetTracker from "./components/TargetTracker";
 import OnChainPositions from "./components/OnChainPositions";
+import WalletLookup from "./components/WalletLookup";
 
 const POLL_FAST = 5_000;
 const POLL_SLOW = 10_000;
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"strategy" | "copy">("strategy");
+  const [activeTab, setActiveTab] = useState<"strategy" | "copy" | "wallet">("strategy");
   const [logHeight, setLogHeight] = useState(110);
   const dragging = useRef(false);
 
@@ -100,6 +101,7 @@ export default function App() {
       switch (e.key) {
         case "1": setActiveTab("strategy"); break;
         case "2": setActiveTab("copy"); break;
+        case "3": setActiveTab("wallet"); break;
         case "s": setSettingsOpen(prev => !prev); break;
         case "Escape": setSettingsOpen(false); break;
       }
@@ -187,7 +189,11 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "strategy" ? (
+        {activeTab === "wallet" ? (
+          <div className="overflow-hidden flex-1 p-0.5">
+            <WalletLookup markets={markets.data} />
+          </div>
+        ) : activeTab === "strategy" ? (
           <div className="grid gap-0.5 p-0.5 overflow-hidden flex-1 grid-cols-[2fr_1fr_360px] grid-rows-[3fr_2fr]">
             <MarketGrid
               markets={markets.data}

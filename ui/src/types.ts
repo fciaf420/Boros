@@ -232,3 +232,71 @@ export interface OnChainPositionsResponse {
   positions: OnChainPosition[];
   error?: string;
 }
+
+export interface WalletPosition {
+  marketId: number;
+  tokenId: number;
+  side: string;
+  sizeBase: number;
+  notionalUsd: number;
+  fixedApr: number;
+  markApr: number;
+  liquidationApr: number | null;
+  initialMarginUsd: number;
+  marginType: string;
+  unrealizedPnl: number;
+  liquidationBufferBps: number | null;
+  allTimePnl: number;
+  settledPct: number;
+}
+
+export interface WalletLookupResponse {
+  address: string;
+  account: {
+    equity: number;
+    availableBalance: number;
+    initialMarginUsed: number;
+    startDayEquity: number;
+    dailyPnl: number;
+  } | null;
+  positions: WalletPosition[];
+  equityCurve: Array<{ timestamp: number; equity: number }>;
+  performance: {
+    totalReturnPct: number;
+    annualizedReturnPct: number;
+    maxDrawdownPct: number;
+    periodDays: number;
+  } | null;
+  tradingActivity: {
+    totalOrders: number;
+    filledOrders: number;
+    fillRate: number;
+    activeDays: number;
+    marketBreakdown: Array<{ marketId: number; count: number }>;
+  } | null;
+  referral: {
+    code: string | null;
+    totalVolume: number;
+    feeShare: number;
+  } | null;
+}
+
+export interface LeaderboardEntry {
+  address: string;
+  equity: number;
+  return7d: number | null;
+  return30d: number | null;
+  maxDrawdown: number | null;
+  positionCount: number;
+  totalNotional: number;
+  lastActive: number;
+}
+
+export interface LeaderboardResponse {
+  updatedAt: number;
+  scanning: boolean;
+  scanProgress?: string;
+  entries: LeaderboardEntry[];
+  walletCount: number;
+  error?: string;
+}

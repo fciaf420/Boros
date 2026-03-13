@@ -23,3 +23,13 @@ export function fmtDays(seconds: number): string {
 export function fmtTime(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toLocaleTimeString();
 }
+
+export function fmtPct(v: number, signed?: boolean): string {
+  const pct = (v * 100).toFixed(2);
+  if (signed) return (v >= 0 ? "+" : "") + pct + "%";
+  return pct + "%";
+}
+
+export function fmtDate(epochSec: number): string {
+  return new Date(epochSec * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}

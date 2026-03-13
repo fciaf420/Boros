@@ -10,8 +10,8 @@ interface HeaderProps {
   onOpenSettings: () => void;
   isCopyMode: boolean;
   copyPositionCount: number;
-  activeTab: "strategy" | "copy";
-  onTabChange: (tab: "strategy" | "copy") => void;
+  activeTab: "strategy" | "copy" | "wallet";
+  onTabChange: (tab: "strategy" | "copy" | "wallet") => void;
   lastRefresh: number | null;
   equityUsd: number | null;
 }
@@ -86,6 +86,16 @@ export default function Header({ state, markets, onOpenSettings, isCopyMode, cop
             }`}
           >
             Copy
+          </button>
+          <button
+            onClick={() => onTabChange("wallet")}
+            className={`px-2.5 py-0.5 text-[11px] font-semibold tracking-wide rounded transition-colors ${
+              activeTab === "wallet"
+                ? "bg-coral/20 text-coral"
+                : "text-text-muted hover:text-text-secondary"
+            }`}
+          >
+            Wallet
           </button>
         </div>
 
