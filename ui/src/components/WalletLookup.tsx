@@ -408,6 +408,8 @@ export default function WalletLookup({ markets }: WalletLookupProps) {
   const [leaderboard, setLeaderboard] = useState<LeaderboardResponse | null>(null);
   const [lbLoading, setLbLoading] = useState(false);
 
+  const [allMarkets, setAllMarkets] = useState<MarketsResponse | null>(null);
+
   useEffect(() => {
     setLbLoading(true);
     fetch("/api/leaderboard")
@@ -415,9 +417,27 @@ export default function WalletLookup({ markets }: WalletLookupProps) {
       .then((json: LeaderboardResponse) => setLeaderboard(json))
       .catch(() => {})
       .finally(() => setLbLoading(false));
+    // Fetch all markets (including delisted) for name resolution
+    fetch("/api/markets/all")
+      .then(r => r.json())
+      .then((json: MarketsResponse) => setAllMarkets(json))
+      .catch(() => {});
   }, []);
 
-  const nameMap = useMemo(() => buildMarketNames(markets), [markets]);
+  // Merge whitelisted + all markets for complete name map
+  const nameMap = useMemo(() => {
+    const map = buildMarketNames(allMarkets);
+    // Overlay whitelisted markets (may have fresher data)
+    if (markets?.results) {
+      for (const m of markets.results) {
+        const label = m.metadata?.assetSymbol
+          ? `${m.metadata.assetSymbol} (${m.metadata.platformName})`
+          : m.imData?.name ?? `Market ${m.marketId}`;
+        map.set(m.marketId, label);
+      }
+    }
+    return map;
+  }, [markets, allMarkets]);
 
   const doLookup = useCallback((addr: string) => {
     if (!addr || addr.length !== 42 || !addr.startsWith("0x")) return;

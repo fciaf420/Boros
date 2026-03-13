@@ -52,6 +52,15 @@ app.get("/api/markets", async (_req, res) => {
   }
 });
 
+app.get("/api/markets/all", async (_req, res) => {
+  try {
+    const data = await borosFetch("/v1/markets?limit=500");
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
 app.get("/api/orderbook/:id", async (req, res) => {
   try {
     const TICK_SIZE = 0.001; // APR per tick
