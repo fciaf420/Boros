@@ -296,24 +296,26 @@ function Leaderboard({ data, loading, period, onSelectWallet, onRefresh }: {
     <Card className="h-full overflow-hidden flex flex-col">
       <CardHeader>
         <CardTitle>Leaderboard</CardTitle>
-        <span className="text-[10px] text-text-muted">
-          {data?.scanning ? (
-            <span className="loading-dots text-amber">Scanning wallets</span>
-          ) : data?.entries.length ? (
-            <>{sorted.length} ranked / {data.walletCount} discovered | {updated}</>
-          ) : loading ? (
-            <span className="loading-dots">loading</span>
-          ) : (
-            <>No data yet</>
-          )}
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-text-muted">
+            {data?.scanning ? (
+              <span className="loading-dots text-amber">Scanning</span>
+            ) : data?.entries.length ? (
+              <>{sorted.length} wallets ranked</>
+            ) : loading ? (
+              <span className="loading-dots">loading</span>
+            ) : (
+              <>No data</>
+            )}
+          </span>
           <button
             onClick={onRefresh}
-            className="ml-2 px-2 py-0.5 bg-coral/20 text-coral text-[10px] font-semibold rounded hover:bg-coral/30 transition-colors disabled:opacity-50"
+            className="px-3 py-1 bg-coral/20 text-coral text-[11px] font-semibold rounded hover:bg-coral/30 transition-colors disabled:opacity-50"
             disabled={data?.scanning}
           >
-            {data?.scanning ? "scanning..." : "Rescan"}
+            {data?.scanning ? "Scanning..." : "Rescan"}
           </button>
-        </span>
+        </div>
       </CardHeader>
       <CardContent className="flex-1 overflow-auto">
         {sorted.length === 0 ? (
