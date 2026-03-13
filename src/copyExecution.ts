@@ -74,8 +74,8 @@ export class CopyExecutor {
     const preNotionalUsd = sizeBase * market.assetMarkPrice;
     if (preNotionalUsd < this.config.minOrderNotionalUsd) {
       if (this.config.roundUpToMinNotional && action !== "EXIT") {
-        // Add 5% buffer to avoid rounding/precision rejections from the API
-        sizeBase = (this.config.minOrderNotionalUsd * 1.05) / market.assetMarkPrice;
+        // Add 20% buffer to avoid rounding/precision rejections from the API
+        sizeBase = (this.config.minOrderNotionalUsd * 1.20) / market.assetMarkPrice;
       } else {
         throw new Error(`Order notional $${preNotionalUsd.toFixed(2)} below $${this.config.minOrderNotionalUsd} minimum`);
       }
@@ -116,13 +116,35 @@ export class CopyExecutor {
 
     // Simulate the order for margin/fee data
     // tif=2 is FILL_OR_KILL
-    const simulation = await this.api.simulateOrder({
-      marketId: market.marketId,
-      side: delta.side,
-      sizeBase18,
-      tif: 2,
-      slippage: this.config.maxSlippage,
-    });
+    // For isolated markets, simulation may fail if no collateral is deposited yet —
+    // in that case we estimate margin and let ensureIsolatedCash() fund it before execution.
+    let simulation: Awaited<ReturnType<typeof this.api.simulateOrder>>;
+    try {
+      simulation = await this.api.simulateOrder({
+        marketId: market.marketId,
+        side: delta.side,
+        sizeBase18,
+        tif: 2,
+        slippage: this.config.maxSlippage,
+      });
+    } catch (simError) {
+      if (market.isIsolatedOnly) {
+        // Estimate margin for isolated markets that aren't funded yet
+        const estimatedMargin = finalNotionalUsd / (market.defaultLeverage || 1);
+        simulation = {
+          marginRequiredUsd: estimatedMargin,
+          actualLeverage: market.defaultLeverage || 1,
+          liquidationApr: undefined,
+          liquidationBufferBps: undefined,
+          priceImpactBps: 0,
+          feeBps: 0,
+          status: "ESTIMATED",
+          raw: {},
+        };
+      } else {
+        throw simError;
+      }
+    }
 
     const rationale = `Copy trade: ${delta.action} ${delta.side} on market ${market.marketId}` +
       ` | target size change: ${delta.sizeChangeBase.toFixed(4)}` +
