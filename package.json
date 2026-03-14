@@ -21,11 +21,13 @@
     "@pendle/sdk-boros": "^1.1.40",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.6.1",
-    "viem": "2.44.4"
+    "viem": "2.44.4",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.15",
+    "@types/ws": "^8.18.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"

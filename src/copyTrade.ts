@@ -92,8 +92,25 @@ export class CopyTrader {
       console.error("[copy-trade] failed to fetch initial snapshot:", error);
     }
 
-    // Start velocity monitor
+    // Start velocity monitor — populate asset map first so it tracks the right coins
     if (this.config.velocity.enabled) {
+      try {
+        const markets = await this.api.fetchMarkets();
+        this.marketCache.clear();
+        const assetMap = new Map<string, number[]>();
+        for (const m of markets) {
+          this.marketCache.set(m.marketId, m);
+          const symbol = m.assetSymbol || m.symbol;
+          if (!symbol) continue;
+          const existing = assetMap.get(symbol) ?? [];
+          existing.push(m.marketId);
+          assetMap.set(symbol, existing);
+        }
+        this.lastMarketFetch = Date.now();
+        this.velocity.setAssetMap(assetMap);
+      } catch (error) {
+        console.error("[copy-trade] failed to fetch markets for velocity asset map:", error);
+      }
       this.velocity.start();
     }
 
@@ -204,21 +221,37 @@ export class CopyTrader {
           targetEntryApr: pos.entryApr,
         };
 
-        const record = await this.processDelta(exitDelta);
-        this.store.saveCopyTradeRecord(record);
+        try {
+          const record = await this.processDelta(exitDelta);
+          this.store.saveCopyTradeRecord(record);
 
-        await this.sendDiscordEmbed({
-          title: "VELOCITY EXIT",
-          color: 0xff6600,
-          fields: [
-            { name: "Market", value: String(pos.marketId), inline: true },
-            { name: "Asset", value: alert.asset, inline: true },
-            { name: "Move", value: `${(alert.pctMove * 100).toFixed(2)}% ${alert.direction}`, inline: true },
-            { name: "Price", value: `$${alert.currentPrice.toFixed(2)}`, inline: true },
-            { name: "Status", value: record.status, inline: true },
-          ],
-          timestamp: new Date().toISOString(),
-        });
+          // Track failure streak for velocity exits
+          if (record.status === "EXECUTED") {
+            this.failureStreak = 0;
+            this.store.setCopyFailureStreak(this.failureStreak);
+          } else if (record.status === "FAILED") {
+            this.failureStreak++;
+            this.store.setCopyFailureStreak(this.failureStreak);
+            console.error(`[copy-trade] VELOCITY EXIT FAILED market=${pos.marketId}: ${record.reason}`);
+          }
+
+          await this.sendDiscordEmbed({
+            title: "VELOCITY EXIT",
+            color: record.status === "EXECUTED" ? 0xff6600 : 0xff0000,
+            fields: [
+              { name: "Market", value: String(pos.marketId), inline: true },
+              { name: "Asset", value: alert.asset, inline: true },
+              { name: "Move", value: `${(alert.pctMove * 100).toFixed(2)}% ${alert.direction}`, inline: true },
+              { name: "Price", value: `$${alert.currentPrice.toFixed(2)}`, inline: true },
+              { name: "Status", value: record.status, inline: true },
+            ],
+            timestamp: new Date().toISOString(),
+          });
+        } catch (error) {
+          console.error(`[copy-trade] VELOCITY EXIT ERROR market=${pos.marketId}:`, error);
+          this.failureStreak++;
+          this.store.setCopyFailureStreak(this.failureStreak);
+        }
       }
     }
 

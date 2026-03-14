@@ -87,10 +87,11 @@ export class RelativeValueTrader {
         );
       eligibleMarkets = markets.length;
 
-      // Update velocity monitor asset map
+      // Update velocity monitor asset map from ALL markets (not just filtered)
+      // so positions in blocklisted/isolated markets still get velocity exits
       if (this.config.velocity.enabled) {
         const assetMap = new Map<string, number[]>();
-        for (const market of markets) {
+        for (const market of allMarkets) {
           const symbol = market.assetSymbol || market.symbol;
           if (!symbol) continue;
           const existing = assetMap.get(symbol) ?? [];
@@ -203,11 +204,10 @@ export class RelativeValueTrader {
           if (!snapshot) continue;
 
           // Build a minimal EXIT candidate
-          // Use taker for immediate fill, use the current market best price for the exit side
-          const orderBook = snapshot.orderBook;
-          const exitSide = position.side;
-          const orderApr = exitSide === "LONG" ? (snapshot.market.bestBid || snapshot.market.midApr) : (snapshot.market.bestAsk || snapshot.market.midApr);
-          const orderTick = exitSide === "LONG" ? orderBook.bestLongTick : orderBook.bestShortTick;
+          // Exit side is CONTRA to position side (LONG position exits via SHORT order)
+          const exitSide: TradeSide = position.side === "LONG" ? "SHORT" : "LONG";
+          const orderApr = this.selectOrderApr(snapshot, exitSide, "taker");
+          const orderTick = this.selectOrderTick(snapshot, exitSide, "taker");
 
           const velocityExitCandidate: TradeCandidate = {
             marketId: position.marketId,
@@ -279,6 +279,10 @@ export class RelativeValueTrader {
       }
       throw error;
     }
+  }
+
+  public stop(): void {
+    this.velocity.stop();
   }
 
   private async evaluateMarkets(
