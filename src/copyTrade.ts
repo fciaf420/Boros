@@ -7,11 +7,13 @@ import type { Broker } from "./execution.js";
 import { LiveBroker, PaperBroker } from "./execution.js";
 import { TargetWatcher } from "./targetWatcher.js";
 import type { CopyPosition, CopyTradeRecord, ExecutionRecord, MarketSummary, TargetPositionDelta, TargetPositionSnapshot, TradeCandidate } from "./types.js";
+import { VelocityMonitor } from "./velocityMonitor.js";
 
 export class CopyTrader {
   private readonly watcher: TargetWatcher;
   private readonly executor: CopyExecutor;
   private readonly broker: Broker;
+  private readonly velocity: VelocityMonitor;
   private running = false;
   private timer?: ReturnType<typeof setInterval>;
   private processing: Promise<void> | null = null;
@@ -43,6 +45,8 @@ export class CopyTrader {
     );
 
     this.executor = new CopyExecutor(config.copyTrade, api);
+
+    this.velocity = new VelocityMonitor(config.velocity);
   }
 
   async start(): Promise<void> {
@@ -86,6 +90,11 @@ export class CopyTrader {
       }
     } catch (error) {
       console.error("[copy-trade] failed to fetch initial snapshot:", error);
+    }
+
+    // Start velocity monitor
+    if (this.config.velocity.enabled) {
+      this.velocity.start();
     }
 
     // Start polling
@@ -149,12 +158,6 @@ export class CopyTrader {
       this.lastHeartbeat = now;
     }
 
-    if (deltas.length === 0) {
-      return;
-    }
-
-    console.log(`[copy-trade] detected ${deltas.length} position change(s)`);
-
     // Refresh market cache if stale (every 5 minutes)
     if (now - this.lastMarketFetch > 300_000) {
       try {
@@ -164,10 +167,66 @@ export class CopyTrader {
           this.marketCache.set(m.marketId, m);
         }
         this.lastMarketFetch = now;
+
+        // Update velocity monitor asset map from market cache
+        if (this.config.velocity.enabled) {
+          const assetMap = new Map<string, number[]>();
+          for (const [marketId, market] of this.marketCache) {
+            const symbol = market.assetSymbol || market.symbol;
+            if (!symbol) continue;
+            const existing = assetMap.get(symbol) ?? [];
+            existing.push(marketId);
+            assetMap.set(symbol, existing);
+          }
+          this.velocity.setAssetMap(assetMap);
+        }
       } catch (error) {
         console.error("[copy-trade] failed to refresh markets:", error);
       }
     }
+
+    // Velocity-triggered emergency exits
+    if (this.config.velocity.enabled && this.velocity.hasActiveAlerts()) {
+      const openPositions = this.store.getOpenCopyPositions();
+      for (const pos of openPositions) {
+        const alert = this.velocity.getAlertForMarket(pos.marketId);
+        if (!alert) continue;
+
+        console.log(`[copy-trade] VELOCITY EXIT market=${pos.marketId} | ${alert.asset} moved ${(alert.pctMove * 100).toFixed(2)}% ${alert.direction} in ${((Date.now() - alert.triggeredAt) / 1000).toFixed(0)}s`);
+
+        // Build an EXIT delta and process it
+        const exitDelta: TargetPositionDelta = {
+          action: "EXIT",
+          marketId: pos.marketId,
+          side: pos.side,
+          sizeChangeBase: pos.sizeBase,
+          targetNewSizeBase: 0,
+          targetEntryApr: pos.entryApr,
+        };
+
+        const record = await this.processDelta(exitDelta);
+        this.store.saveCopyTradeRecord(record);
+
+        await this.sendDiscordEmbed({
+          title: "VELOCITY EXIT",
+          color: 0xff6600,
+          fields: [
+            { name: "Market", value: String(pos.marketId), inline: true },
+            { name: "Asset", value: alert.asset, inline: true },
+            { name: "Move", value: `${(alert.pctMove * 100).toFixed(2)}% ${alert.direction}`, inline: true },
+            { name: "Price", value: `$${alert.currentPrice.toFixed(2)}`, inline: true },
+            { name: "Status", value: record.status, inline: true },
+          ],
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    if (deltas.length === 0) {
+      return;
+    }
+
+    console.log(`[copy-trade] detected ${deltas.length} position change(s)`);
 
     const processedRecords: CopyTradeRecord[] = [];
 
@@ -614,6 +673,7 @@ export class CopyTrader {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.velocity.stop();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;

@@ -38,6 +38,10 @@ export class CopyExecutor {
 
     const isExit = delta.action === "EXIT" || delta.action === "DECREASE";
 
+    if (!market.assetMarkPrice || market.assetMarkPrice <= 0) {
+      throw new Error(`Market ${market.marketId} has invalid assetMarkPrice (${market.assetMarkPrice}); skipping`);
+    }
+
     // For ENTER/INCREASE we use the delta's sizeChangeBase; for EXIT/DECREASE we also use sizeChangeBase
     let sizeBase = this.computeCopySize(delta.sizeChangeBase);
 

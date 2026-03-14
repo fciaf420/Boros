@@ -6,6 +6,7 @@ import { allocateSignalWeightedBudgets, chooseInitialSizeBase, computeRiskState,
 import { estimateFairValue } from "./strategy.js";
 import type { ActionType, AgentCollateralIntent, AgentExecutionIntent, CycleAction, CycleSummary, ExecutionRecord, MarketEvaluation, MarketSnapshot, OpenPosition, TradeCandidate, TradeSide } from "./types.js";
 import { decimalToBps, fromBase18, settlementAdjustedEdge } from "./utils.js";
+import { VelocityMonitor } from "./velocityMonitor.js";
 
 const MAKER_TIF = 3;
 const TAKER_TIF = 2;
@@ -14,6 +15,7 @@ const MAX_EXECUTION_RETRIES = 6;
 
 export class RelativeValueTrader {
   private readonly broker: Broker;
+  private readonly velocity: VelocityMonitor;
   private failureStreak = 0;
 
   public constructor(
@@ -22,6 +24,10 @@ export class RelativeValueTrader {
     private readonly store: RuntimeStore,
   ) {
     this.broker = config.mode === "live" ? new LiveBroker(config) : new PaperBroker(config);
+    this.velocity = new VelocityMonitor(config.velocity);
+    if (config.velocity.enabled) {
+      this.velocity.start();
+    }
   }
 
   public async runOnce(): Promise<CycleSummary> {
@@ -80,6 +86,19 @@ export class RelativeValueTrader {
           market.timeToMaturitySeconds >= this.config.minDaysToMaturity * 24 * 3600,
         );
       eligibleMarkets = markets.length;
+
+      // Update velocity monitor asset map
+      if (this.config.velocity.enabled) {
+        const assetMap = new Map<string, number[]>();
+        for (const market of markets) {
+          const symbol = market.assetSymbol || market.symbol;
+          if (!symbol) continue;
+          const existing = assetMap.get(symbol) ?? [];
+          existing.push(market.marketId);
+          assetMap.set(symbol, existing);
+        }
+        this.velocity.setAssetMap(assetMap);
+      }
 
       const snapshotResults = await Promise.allSettled(markets.map((market) => this.api.buildSnapshot(market)));
       const snapshots = snapshotResults
@@ -162,6 +181,68 @@ export class RelativeValueTrader {
 
       for (const evaluation of evaluations) {
         this.store.saveSignal(evaluation.fairValue, evaluation.candidate);
+      }
+
+      // Velocity-triggered emergency exits — inject before normal exit handling
+      if (this.config.velocity.enabled && this.velocity.hasActiveAlerts()) {
+        for (const position of liveOpenPositions) {
+          if (position.status !== "OPEN") continue;
+          const alert = this.velocity.getAlertForMarket(position.marketId);
+          if (!alert) continue;
+
+          // Check if there's already an EXIT evaluation for this market
+          const alreadyExiting = evaluations.some(
+            e => e.candidate?.marketId === position.marketId && e.candidate?.action === "EXIT"
+          );
+          if (alreadyExiting) continue;
+
+          console.log(`[velocity] emergency exit: market=${position.marketId} ${alert.asset} moved ${(alert.pctMove * 100).toFixed(2)}% ${alert.direction}`);
+
+          // Find the snapshot for this market
+          const snapshot = snapshots.find(s => s.market.marketId === position.marketId);
+          if (!snapshot) continue;
+
+          // Build a minimal EXIT candidate
+          // Use taker for immediate fill, use the current market best price for the exit side
+          const orderBook = snapshot.orderBook;
+          const exitSide = position.side;
+          const orderApr = exitSide === "LONG" ? (snapshot.market.bestBid || snapshot.market.midApr) : (snapshot.market.bestAsk || snapshot.market.midApr);
+          const orderTick = exitSide === "LONG" ? orderBook.bestLongTick : orderBook.bestShortTick;
+
+          const velocityExitCandidate: TradeCandidate = {
+            marketId: position.marketId,
+            tokenId: position.tokenId,
+            isIsolatedOnly: position.isIsolatedOnly,
+            side: exitSide,
+            action: "EXIT" as ActionType,
+            orderIntent: "taker",
+            edgeBps: 0,
+            netEdgeBps: 0,
+            targetApr: orderApr,
+            orderTick,
+            orderApr,
+            sizeBase: position.sizeBase,
+            sizeBase18: BigInt(position.sizeBase18),
+            notionalUsd: position.notionalUsd,
+            plannedMarginUsd: position.initialMarginUsd,
+            simulation: {
+              marginRequiredUsd: position.initialMarginUsd,
+              actualLeverage: position.actualLeverage,
+              priceImpactBps: 0,
+              feeBps: 0,
+              status: "VELOCITY_EXIT",
+              raw: {},
+            },
+            rationale: `VELOCITY EXIT: ${alert.asset} moved ${(alert.pctMove * 100).toFixed(2)}% ${alert.direction} in ${Math.round((Date.now() - alert.triggeredAt) / 1000)}s`,
+          };
+
+          // Inject into evaluations so handleExits() picks it up
+          evaluations.push({
+            snapshot,
+            fairValue: { marketId: position.marketId, fairApr: orderApr, sources: [], clippedSources: [], edgeBpsLong: 0, edgeBpsShort: 0 },
+            candidate: velocityExitCandidate,
+          });
+        }
       }
 
       const agentIntentActions = await this.handleAgentIntents(evaluations, positionsForCycle, activeOrders, riskState);

@@ -67,6 +67,13 @@ function makeConfig(overrides?: Partial<TraderConfig["copyTrade"]>): TraderConfi
     agentConfidenceThreshold: 0,
     maxCollateralTransferUsd: 500,
     dryRun: false,
+    velocity: {
+      enabled: false,
+      windowMs: 120_000,
+      thresholdPct: 0.015,
+      alertCooldownMs: 300_000,
+      reconnectDelayMs: 5_000,
+    },
     copyTrade: {
       enabled: true,
       targetAddress: "0x0000000000000000000000000000000000000001",

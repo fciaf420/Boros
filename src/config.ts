@@ -106,6 +106,13 @@ export interface TraderConfig {
   accountId?: number;
   rootAddress?: `0x${string}`;
   privateKey?: `0x${string}`;
+  velocity: {
+    enabled: boolean;
+    windowMs: number;
+    thresholdPct: number;
+    alertCooldownMs: number;
+    reconnectDelayMs: number;
+  };
   copyTrade: CopyTradeConfig;
 }
 
@@ -173,6 +180,13 @@ export function loadConfig(cwd = process.cwd()): TraderConfig {
     accountId: process.env.BOROS_ACCOUNT_ID ? Number(process.env.BOROS_ACCOUNT_ID) : undefined,
     rootAddress: process.env.BOROS_ROOT_ADDRESS as `0x${string}` | undefined,
     privateKey: process.env.BOROS_PRIVATE_KEY as `0x${string}` | undefined,
+    velocity: {
+      enabled: getOptionalBoolean("BOROS_VELOCITY_ENABLED", true),
+      windowMs: getOptionalNumber("BOROS_VELOCITY_WINDOW_MS", 120_000),
+      thresholdPct: getOptionalNumber("BOROS_VELOCITY_THRESHOLD_PCT", 0.03),
+      alertCooldownMs: getOptionalNumber("BOROS_VELOCITY_ALERT_COOLDOWN_MS", 300_000),
+      reconnectDelayMs: getOptionalNumber("BOROS_VELOCITY_RECONNECT_DELAY_MS", 5_000),
+    },
     copyTrade: {
       enabled: getOptionalBoolean("BOROS_COPY_TRADE_ENABLED", false),
       targetAddress: (process.env.BOROS_COPY_TRADE_TARGET_ADDRESS ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
