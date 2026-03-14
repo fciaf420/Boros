@@ -215,7 +215,7 @@ export class VelocityMonitor {
   }
 
   private isTrackedAsset(symbol: string): boolean {
-    if (this.assetMap.size === 0) return true; // track everything if no map set
+    if (this.assetMap.size === 0) return false; // no map yet — don't track anything
     if (this.assetMap.has(symbol)) return true;
     // Check XAU/PAXG special mapping
     if (symbol === "PAXG" && this.assetMap.has("XAU")) return true;
